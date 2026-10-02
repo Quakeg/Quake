@@ -1,0 +1,4338 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>Quake</title>
+<link rel="stylesheet" href="static/leaflet.min.css"/>
+<script src="static/leaflet.min.js"></script>
+<script>
+var _SOUND_CTX = null;
+var _LAST_EEW_ID = '';
+var _LAST_EEW_REPORT = 0;
+var _LAST_HIST_ID = '';
+
+function _initSound(){
+  if(!_SOUND_CTX){
+    try { _SOUND_CTX = new (window.AudioContext || window.webkitAudioContext)(); } catch(e){}
+  }
+}
+
+
+
+
+
+function playAlertSound(type){
+  // 优先播放自定义声音
+  if (window._customSounds && window._customSounds[type]) {
+    var audio = new Audio(window._customSounds[type]);
+    audio.play().catch(function(e){});
+    return;
+  }
+  _initSound();
+  if(!_SOUND_CTX) return;
+  var ctx = _SOUND_CTX;
+  if(ctx.state === 'suspended') ctx.resume();
+  
+  function beep(freq, dur, delay){
+    var osc = ctx.createOscillator();
+    var gain = ctx.createGain();
+    osc.connect(gain); gain.connect(ctx.destination);
+    osc.frequency.value = freq;
+    osc.type = 'sine';
+    gain.gain.setValueAtTime(0.3, ctx.currentTime + delay);
+    gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + delay + dur);
+    osc.start(ctx.currentTime + delay);
+    osc.stop(ctx.currentTime + delay + dur);
+  }
+  
+  if(type === 'new_eew'){
+    // 新地震预警：滴滴滴（高）
+    beep(880, 0.15, 0);
+    beep(880, 0.15, 0.25);
+    beep(880, 0.15, 0.5);
+  } else if(type === 'update_eew'){
+    // 预警更新：低一声
+    beep(440, 0.3, 0);
+  } else if(type === 'hist'){
+    // 历史刷新：不同音效（两低）
+    beep(330, 0.2, 0);
+    beep(330, 0.2, 0.3);
+  }
+}
+
+// 监听数据更新
+setInterval(function(){
+  // 新地震预警
+  if(window.allEew && allEew.length){
+    var e = allEew[0];
+    var id = String(e.EventID || '');
+    var rn = e.ReportNum || 1;
+    if(id !== _LAST_EEW_ID){
+      _LAST_EEW_ID = id;
+      _LAST_EEW_REPORT = rn;
+      playAlertSound('new_eew');
+    } else if(rn > _LAST_EEW_REPORT){
+      _LAST_EEW_REPORT = rn;
+      playAlertSound('update_eew');
+    }
+  }
+  // 地震历史
+  if(window.allHist && allHist.length){
+    var h = allHist[0];
+    var hid = String(h.EventID || '');
+    if(hid && hid !== _LAST_HIST_ID){
+      _LAST_HIST_ID = hid;
+      playAlertSound('hist');
+    }
+  }
+}, 2000);
+
+// 首次点击激活声音
+document.addEventListener('click', function(){
+  _initSound();
+}, {once: true});
+</script>
+<script>
+var _lastTsunamiKey = '';
+function checkTsunami(){
+  fetch(API_BASE + '/tsunami').then(function(r){return r.json();}).then(function(arr){
+    if (!Array.isArray(arr) || !arr.length) {
+      if (window._tsunamiMarkerLayer) window._tsunamiMarkerLayer.clearLayers();
+      return;
+    }
+    // 渲染右侧卡片（保持原有逻辑）
+    if (typeof renderTsunamiCards === 'function') renderTsunamiCards(arr);
+
+    // 地图绘制海啸图标
+    if (!window._tsunamiMarkerLayer) {
+        window._tsunamiMarkerLayer = L.layerGroup().addTo(map);
+    }
+    window._tsunamiMarkerLayer.clearLayers();
+
+    for(var i=0; i<arr.length; i++){
+        var t = arr[i];
+        var lat = parseFloat(t.latitude), lng = parseFloat(t.longitude);
+        // 如果经纬度有效，则绘制在地图上
+        if(!isNaN(lat) && !isNaN(lng) && lat !== 0 && lng !== 0){
+            var iconHtml = '<div style="color:#1e6fd9;font-size:24px;text-align:center;text-shadow:0 0 4px #000;line-height:24px;">🌊</div>' +
+                           '<div style="color:#fff;font-size:9px;font-weight:bold;text-shadow:0 0 3px #000,0 0 3px #000;white-space:nowrap;margin-top:-2px;">海啸</div>';
+            L.marker([lat, lng], {icon: L.divIcon({className:'', html:iconHtml, iconSize:[40,40], iconAnchor:[20,20]})})
+             .bindPopup('<b>' + (t.title || '海啸') + '</b><br>' + (t.subtitle || '') + '<br><span style="color:#aaa;">M' + (t.magnitude||'?') + ' · 深' + (t.depth||'?') + 'km · ' + (t.shockTime||'') + '</span>')
+             .addTo(window._tsunamiMarkerLayer);
+        }
+    }
+  }).catch(function(){});
+}
+setInterval(checkTsunami, 5000);
+checkTsunami();
+setInterval(checkTsunami, 5000);
+checkTsunami();
+
+
+function updateHomeMarker(){
+  if (!_myPos || isNaN(_myPos.lat) || isNaN(_myPos.lon)) return;
+  if (window._homeMarker) map.removeLayer(window._homeMarker);
+  window._homeMarker = L.circleMarker([_myPos.lat, _myPos.lon], {
+    radius: 8, color: '#ffffff', weight: 2, fillColor: '#00e676', fillOpacity: 1.0
+  }).addTo(map);
+  window._homeMarker.bindPopup('我家位置<br>' + _myPos.lat.toFixed(4) + ', ' + _myPos.lon.toFixed(4));
+  var icon = L.divIcon({
+    className: '',
+    html: '<div style="color:#00e676; font-size:13px; font-weight:bold; text-shadow: 0 0 3px #000; white-space:nowrap;">家</div>',
+    iconSize: [20, 16], iconAnchor: [-10, 8]
+  });
+  if (window._homeLabel) map.removeLayer(window._homeLabel);
+  window._homeLabel = L.marker([_myPos.lat, _myPos.lon], {icon: icon, interactive: false}).addTo(map);
+}
+
+
+
+function toggleCfg(){
+  var c = document.getElementById('cfg');
+  if(!c) return;
+  if(c.className.indexOf('show') >= 0){ c.className = ''; return; }
+  c.className = 'show';
+  buildCfg();
+}
+
+var _cfgTab = -1;
+
+
+
+function saveApiBase(){
+  var v = (document.getElementById('setApiBase')||{}).value || '';
+  if(!v){ if (window.showNotice) window.showNotice('不能为空', '#ffcc00'); return; }
+  if(v.endsWith('/')) v = v.slice(0, -1);
+  localStorage.setItem('api_base', v);
+  API_BASE = v;
+  alert('已保存：' + v + '\n刷新页面生效');
+}
+
+function saveToken(){
+  var v = (document.getElementById('setToken')||{}).value || '';
+  localStorage.setItem('whews_token', v);
+  var box = document.getElementById('connStatusBox');
+  if(box) box.innerHTML = '<span style="color:#ffcc00;">测试中...</span>';
+  fetch(API_BASE + '/conn_status').then(function(r){ return r.json(); }).then(function(d){
+    var ok = false;
+    for(var k in d){ if(d[k]) { ok = true; break; } }
+    if(box){
+      if(ok) box.innerHTML = '<span style="color:#00e676;font-weight:bold;">\u2713 已连接</span>';
+      else box.innerHTML = '<span style="color:#ff5252;">\u2717 未连接</span>';
+    }
+  }).catch(function(){
+    if(box) box.innerHTML = '<span style="color:#ff5252;">\u2717 未连接</span>';
+  });
+}
+
+function saveCustomSrc(){
+  var v = (document.getElementById('setCustomSrc')||{}).value || '';
+  if(!v.startsWith('wss://') && !v.startsWith('ws://')){ if (window.showNotice) window.showNotice('只支持 wss:// 或 ws://', '#ffcc00'); return; }
+  fetch('/set_custom_source?url=' + encodeURIComponent(v)).then(function(r){return r.json();}).then(function(d){
+    alert(d.ok ? '已连接: ' + v : '失败: ' + d.msg);
+  }).catch(function(e){ alert('请求失败: ' + e); });
+}
+
+
+var _cachedSrcStates = null;  // 全局缓存
+
+
+
+function renderSrcStates(box, states){
+  var groups = [
+    { name: '地震预警', list: ['WHEWS','GQ','USGS','CENC','JMA情报','CWA情报','JMA海啸','CWA_EWW','SA_EWW','KMA_EWW','EARLY_EST'] },
+    { name: '测站数据', list: ['kma测站','palert测站','trem测站','snet测站','nied测站'] },
+    { name: '地震情报(国内)', list: ['CEA','CEA_PR','CEA_ALL','CENC','CENC_INT','BEIJING','YUNNAN','NINGXIA','DZJ'] },
+    { name: '地震情报(国际)', list: ['KMA','BMKG','GEONET','TMD','USP','GFZ','INGV','USGS','EMSC','HKO','BCSF','NRCAN','MMD','PHIVOLCS','GA','CENAIS','GSRAS','BGS','IPMA','SSN','AFAD','SED','NOA','SCSN','IAG','IGP','NEPAL'] },
+    { name: '矩张量 CMT', list: ['CMT_USGS','CMT_EMSC','CMT_GFZ','CMT_INGV','CMT_CENC'] },
+    { name: '海啸', list: ['TSUNAMI_NMEFC','TSUNAMI_NTWC','TSUNAMI_PTWC','TSUNAMI_INCOIS','TSUNAMI_CAT','TSUNAMI_CWA','JMA_OKIAI'] },
+    { name: '其它', list: ['海啸','台风','火山','气象','自然灾害','小行星'] },
+];
+  function render(states){
+    var html = '';
+    for(var g=0; g<groups.length; g++){
+      var grp = groups[g];
+      html += '<div style="color:#fff;font-weight:bold;margin:8px 0 4px;border-bottom:1px solid #444;padding-bottom:2px;">' + grp.name + '</div>';
+      for(var i=0;i<grp.list.length;i++){
+        var k = grp.list[i];
+        var v = states[k];
+        var txt, color;
+        if(v === '已连接' || v === true){ txt = '已连接'; color = '#00e676'; }
+        else if(v === '重试中'){ txt = '重试中'; color = '#ffcc00'; }
+        else { txt = '未连接'; color = '#888'; }
+        html += '<div style="display:flex;justify-content:space-between;padding:2px 0;font-size:12px;">' +
+                '<span style="color:' + color + ';">' + k + '</span>' +
+                '<span style="color:' + color + ';">' + txt + '</span></div>';
+      }
+    }
+    box.innerHTML = html;
+  }
+  render({});
+  fetch(API_BASE + '/source_list').then(function(r){return r.json();}).then(function(d){
+    render(d || {});
+  }).catch(function(){});
+}
+
+
+
+function refreshConnStatus(){
+  fetch(API_BASE + '/conn_status').then(function(r){return r.json();}).then(function(d){
+    var box = document.getElementById('connStatusBox');
+    if(!box) return;
+    var html = '';
+    for(var k in d){
+      var ok = d[k];
+      var color = ok ? '#00e676' : '#ff5252';
+      html += '<div style="display:flex;justify-content:space-between;padding:2px 0;">' +
+              '<span>' + k + '</span>' +
+              '<span style="color:' + color + ';">' + (ok ? '已连接' : '未连接') + '</span></div>';
+    }
+    box.innerHTML = html || '暂无数据';
+  }).catch(function(){});
+}
+
+function cfgTab(t){
+  _cfgTab = t;
+  buildCfg();
+}
+
+function savePos(){
+  var la = parseFloat(document.getElementById('setLat').value);
+  var lo = parseFloat(document.getElementById('setLon').value);
+  if(isNaN(la)||isNaN(lo)){ if (window.showNotice) window.showNotice('坐标不合法', '#ffcc00'); return; }
+  _myPos = {lat:la, lon:lo};
+  try{ localStorage.setItem('myPos', JSON.stringify(_myPos)); }catch(e){}
+  alert('已保存：'+la.toFixed(4)+', '+lo.toFixed(4));
+  updateHomeMarker();
+}
+
+
+function startSimSequence(){
+  var eid = "sim_seq_" + Date.now();
+  var lat = 30.0, lon = 125.0, loc = "东海海域";
+  var seq = [
+    {delay: 15,  mag: 6.2, reportNum: 1, isFinal: false, eid: eid, lat: lat, lon: lon, loc: loc},
+    {delay: 50,  mag: 7.2, reportNum: 2, isFinal: false, eid: eid, lat: lat, lon: lon, loc: loc},
+    {delay: 25,  mag: 7.7, reportNum: 3, isFinal: false, eid: eid, lat: lat, lon: lon, loc: loc},
+    {delay: 90,  mag: 7.7, reportNum: 4, isFinal: false, eid: eid, lat: lat, lon: lon, loc: loc},
+    {delay: 240, mag: 7.7, reportNum: 5, isFinal: true,  eid: eid, lat: lat, lon: lon, loc: loc}
+  ];
+  fetch(API_BASE + '/sim_sequence', {
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body: JSON.stringify(seq)
+  }).then(function(r){return r.text();}).then(function(){if (window.showNotice) window.showNotice('时间线已启动：15s/65s/90s/180s/420s 各一报', '#ffcc00');}).catch(function(e){alert('失败:'+e);});
+}
+
+function sendSim(){
+  var d = {
+    source: 'SIM',
+    lat: parseFloat((document.getElementById('simLat')||{}).value) || 31.02,
+    lon: parseFloat((document.getElementById('simLon')||{}).value) || 113.76,
+    mag: Math.min(10.0, Math.max(0, parseFloat((document.getElementById('simMag')||{}).value) || 5.0)),
+    dep: Math.min(700, Math.max(0, parseFloat((document.getElementById('simDep')||{}).value) || 10.0)),
+    loc: (document.getElementById('simLoc')||{}).value || '模拟震中'
+  };
+  fetch(API_BASE + '/sim_send', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(d)})
+    .then(function(r){ return r.text(); })
+    .then(function(t){ alert('已发送：'+t); })
+    .catch(function(e){ alert('发送失败：'+e); });
+}
+
+
+
+function updateCountdown(){
+  var pEl = document.getElementById('wt-p');
+  var sEl = document.getElementById('wt-s');
+  var dEl = document.getElementById('wt-dist');
+  if(!pEl || !sEl) return;
+
+  function fmt(sec){
+    if(isNaN(sec)) return '--:--';
+    if(sec <= 0) return '已到达';
+    var m = Math.floor(sec/60), ss = Math.floor(sec%60);
+    return pad2(m)+':'+pad2(ss);
+  }
+
+  var e = null;
+  if(_groups && _groups.length){
+    e = _groups[0] && _groups[0][0];
+  }
+  if(!e || !isActiveEEW(e)){
+    pEl.innerText = '--:--';
+    sEl.innerText = '--:--';
+    if(dEl) dEl.innerText = '--';
+    return;
+  }
+
+  var t0 = parseTime(e.OriginTime);
+  var la = parseFloat(e.Latitude), lo = parseFloat(e.Longitude);
+  if(isNaN(t0) || isNaN(la) || isNaN(lo)) return;
+  var depth = parseFloat(e.Depth) || 0;
+  var dist = _hav(_myPos.lat, _myPos.lon, la, lo);
+  var hypoDist = Math.sqrt(dist*dist + depth*depth);
+  var el = (Date.now() - t0) / 1000;
+  pEl.innerText = fmt(hypoDist / P_SPEED - el);
+  sEl.innerText = fmt(hypoDist / S_SPEED - el);
+  if(dEl) dEl.innerText = Math.round(hypoDist);
+}
+
+
+
+
+
+
+</script>
+<style>
+html,body{margin:0;height:100%;font-family:sans-serif;background:#1e3a8a;color:#eee;overflow:hidden}
+#wrap{display:flex;height:100%}
+#map{flex:1;min-height:200px}
+#side{width:380px;background:#0a0a0a;overflow-y:auto;border-left:1px solid #333;flex-shrink:0}
+.item{padding:10px 12px;border-bottom:1px solid #262626;cursor:pointer;font-size:13px}
+.item:hover{background:#222}
+.item{font-size:14px;}
+.item .loc{font-weight:bold}
+.item .meta{color:#999;font-size:12px;margin-top:3px}
+.badge{display:inline-block;color:#fff;border-radius:3px;padding:2px 7px;margin-right:5px;font-weight:bold;font-size:13px}
+.b-eew{background:#e63946}
+.b-hist{background:#457b9d}
+.b-mag{background:#333}
+.b-rn{background:#2a9d8f}
+.b-final{background:#f4a261;color:#000}
+#tabs{position:fixed;left:50%;transform:translateX(-50%);bottom:12px;z-index:9999;background:rgba(0,0,0,.9);border-radius:8px;padding:4px;display:inline-flex;gap:4px}
+#tabs button{border:none;padding:8px 16px;border-radius:6px;cursor:pointer;font-size:14px;color:#ccc;background:#333;white-space:nowrap}
+#tabAll.on{background:#2a9d8f;color:#fff;font-weight:bold}
+#tabEew.on{background:#e63946;color:#fff;font-weight:bold}
+#tabHist.on{background:#457b9d;color:#fff;font-weight:bold}
+#tabTsunami.on{background:#7209b7;color:#fff;font-weight:bold}
+#tabTyphoon.on{background:#ff2d2d;color:#fff;font-weight:bold}
+#tabVolcano.on{background:#ff6b00;color:#fff;font-weight:bold}
+#tabWeather.on{background:#ffcc00;color:#000;font-weight:bold}
+#tabCheji.on{background:#8b00ff;color:#fff;font-weight:bold}
+#tabNea.on{background:#3333cc;color:#fff;font-weight:bold}
+#tabTsunami2.on{background:#1e6fd9;color:#fff;font-weight:bold}
+#tabStation.on{background:#00e676;color:#000;font-weight:bold}
+#legend .ic-rec{color:#ff8c00;font-size:16px}
+#legend .ic-warn{color:#ff2d2d;font-size:16px;font-weight:bold}
+#cfg{position:fixed;right:372px;top:12px;z-index:99999;background:rgba(20,20,20,.98);border:1px solid #555;border-radius:10px;padding:16px 22px;display:none;width:580px;max-height:85vh;overflow-y:auto;color:#eee;font-size:14px}
+#cfg.show{display:block}
+#cfg .t{font-weight:bold;color:#fff;padding:8px 0 6px;border-bottom:1px solid #444;margin:10px 0 8px;font-size:14px}
+#cfg label{display:block;padding:6px 8px;cursor:pointer;border-radius:4px;color:#ddd}
+#cfg input[type="number"],#cfg input[type="text"]{padding:5px 8px;background:#222;color:#eee;border:1px solid #555;border-radius:4px;font-size:13px}
+#cfg button{padding:6px 16px;border:none;border-radius:4px;cursor:pointer;font-size:13px;background:#2a9d8f;color:#fff}
+#cfg .row{padding:6px 8px}
+#info{position:fixed;left:12px;top:12px;z-index:9999;background:rgba(0,0,0,.85);border-radius:8px;padding:10px 14px;min-width:230px;font-size:13px;color:#eee}
+.tbox{position:fixed;right:580px;z-index:9999;background:rgba(0,0,0,.85);border-radius:8px;padding:8px 12px;font-size:13px;font-weight:bold;color:#fff;width:200px;text-align:left;box-sizing:border-box;white-space:nowrap}
+.tbox span{font-size:16px}
+</style>
+
+
+
+
+
+</style>
+<style>
+@keyframes typhoon-spin {
+  from { transform: rotate(0deg); }
+  to   { transform: rotate(360deg); }
+}
+.typhoon-spin {
+  display: inline-block;
+  animation: typhoon-spin 3s linear infinite;
+  transform-origin: center center;
+}
+</style>
+
+
+
+
+<style>
+.blue-tiles {
+  filter: invert(0.9) hue-rotate(180deg) saturate(1.5) brightness(0.9) contrast(0.9);
+}
+</style>
+
+<style>
+.dark-map {
+  filter: invert(1) hue-rotate(180deg) brightness(0.75) contrast(1.1) saturate(0.7);
+}
+</style>
+
+<script>
+// ===== 屏蔽日志刷屏 =====
+(function(){
+    var _noop = function(){};
+    console.log = _noop;
+    console.info = _noop;
+    console.warn = _noop;
+    // 保留 console.error 用于排查
+})();
+</script>
+
+
+<!-- QUAKE_SCALE_FIX -->
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=5.0, user-scalable=yes">
+<style>
+  html { -webkit-text-size-adjust: 100%; }
+</style>
+</head>
+<body>
+<div id="wrap"><div id="map"></div><div id="side"><div id="tsunami-banner" style="display:none;padding:10px;border-bottom:2px solid #7209b7;font-size:13px;cursor:pointer;"></div></div></div>
+
+<div id="info" style="position:fixed;left:12px;top:12px;z-index:9999;background:rgba(0,0,0,.88);border-radius:8px;padding:10px 14px;min-width:250px;font-size:13px;color:#eee;display:block;">
+  <div id="info-main"></div>
+  <div style="margin-top:8px;padding-top:6px;border-top:1px solid #444;">
+    <div style="color:#fff;font-weight:bold;margin-bottom:3px;font-size:12px;">今天最大地震</div>
+    <div id="today-max-info" style="color:#ff6b6b;font-size:12px;">暂无</div>
+  </div>
+  <div style="margin-top:8px;padding-top:6px;border-top:1px solid #444;">
+    <div style="color:#fff;font-weight:bold;margin-bottom:4px;font-size:12px;">测站最大震度</div>
+    <div id="station-intensity" style="font-size:12px;line-height:1.6;color:#ccc;">
+      <div style="display:flex;justify-content:space-between;"><span>台湾测站</span><span style="color:#666;">--</span></div>
+      <div style="display:flex;justify-content:space-between;"><span>韩国测站</span><span style="color:#666;">--</span></div>
+      <div style="display:flex;justify-content:space-between;"><span>日本陆地测站</span><span style="color:#666;">--</span></div>
+      <div style="display:flex;justify-content:space-between;"><span>日本海底测站</span><span style="color:#666;">--</span></div>
+    </div>
+  </div>
+    </div>
+  </div>
+</div>
+<div id="info-content"><div style="color:#aaa;font-size:14px;padding:10px 0;">当前暂无活跃地震波</div></div>
+</div>
+
+</div>
+
+<script>
+if(typeof L==='undefined'){document.getElementById('map').innerHTML='<div style="padding:20px;color:#f00;">Leaflet 未加载</div>';}
+var map = L.map('map', {attributionControl:false, zoomControl:false, preferCanvas:true}).fitBounds([[15, 70], [55, 150]]);
+L.tileLayer('https://webrd0{s}.is.autonavi.com/appmaptile?lang=zh_cn&size=1&scale=1&style=8&x={x}&y={y}&z={z}', {
+  className: 'dark-map',
+  subdomains: ['1','2','3','4'],
+  maxZoom: 18
+}).addTo(map);
+var canvasRenderer = L.canvas({padding: 0.5});
+
+// ===== 降水/降雪图层（RainViewer）=====
+var _rainLayer = null;
+function loadRainLayer(){
+  // 降水图层已禁用（避免 Zoom Level Not Supported）
+}
+// loadRainLayer(); 已禁用
+// 降水定时器已禁用
+
+window.addEventListener('resize', function(){ setTimeout(function(){ map.invalidateSize(); }, 200); });
+setTimeout(function(){ map.invalidateSize(); }, 500);
+
+// 官方通用地震波速度标准 (地壳平均: P波7.0km/s, S波4.0km/s)
+var P_SPEED = 7.0, S_SPEED = 4.0;
+var events = {}, markers = {}, current = null;
+var allEew = [], allHist = [], _tsunamiList = [];
+var _myPos = {lat:31.02, lon:113.75};
+var API_BASE = localStorage.getItem("api_base") || "http://127.0.0.1:18080";
+updateHomeMarker();
+var _groups = [], _curGroup = 0, _curIn = 0;
+var tab = 2;
+var waveCircles = {};
+
+function pad2(n){ return (n<10?'0':'') + n; }
+function parseTime(s){
+  if(!s) return NaN;
+  return new Date(String(s).replace(/-/g,'/').replace('T',' ')).getTime();
+}
+function pickLoc(e){
+  var c = [e.HypoCenter, e.Hypocenter, e.epicenter, e.placeName, e.LOCATION_C, e.location, e.place];
+  for(var i=0;i<c.length;i++){ if(c[i] && String(c[i]).trim()!=="") return String(c[i]); }
+  return '未知';
+}
+
+function _getSrcName(e){
+  var t = String(e.type || '').toUpperCase();
+  var loc = String(e.HypoCenter || e.Hypocenter || '');
+  var m = loc.match(/^\[([^\]]+)\]/);
+  if (m) return m[1];
+  if (t.indexOf('JMA') >= 0) return 'JMA';
+  if (t.indexOf('CWA') >= 0) return 'CWA';
+  if (t.indexOf('CENC') >= 0) return 'CENC';
+  if (t.indexOf('CEA') >= 0) return 'CEA';
+  if (t.indexOf('SC_EEW') >= 0) return 'SC';
+  if (t.indexOf('FJ_EEW') >= 0) return 'FJ';
+  if (t.indexOf('CQ_EEW') >= 0) return 'CQ';
+  if (t.indexOf('KMA') >= 0) return 'KMA';
+  if (t.indexOf('USGS') >= 0) return 'USGS';
+  if (t.indexOf('EMSC') >= 0) return 'EMSC';
+  if (t.indexOf('GQ') >= 0) return 'GQ';
+  if (t.indexOf('SA_EEW') >= 0) return 'SA';
+  if (t.indexOf('SIM') >= 0) return 'SIM';
+  return t || '其他';
+}
+
+function cleanLoc(s){ return String(s||'').replace(/^\[[^\]]*\]/, '').trim(); }
+function _hav(la1, lo1, la2, lo2){
+  var R=6371, d2r=Math.PI/180;
+  var dLa=(la2-la1)*d2r, dLo=(lo2-lo1)*d2r;
+  var a = Math.sin(dLa/2)*Math.sin(dLa/2) + Math.cos(la1*d2r)*Math.cos(la2*d2r)*Math.sin(dLo/2)*Math.sin(dLo/2);
+  return R*2*Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+}
+function isActiveEEW(e){
+  if(!e) return false;
+  var t0 = parseTime(e.OriginTime);
+  if(isNaN(t0)) return false;
+  var el = (Date.now() - t0) / 1000;
+  return el >= 0 && el <= 600;
+}
+function getIntensityColor(inten, isJP){
+  if (isJP) {
+    if (inten >= 7) return '#7a0000';
+    if (inten >= 6.5) return '#ff0000';
+    if (inten >= 6) return '#ff4500';
+    if (inten >= 5.5) return '#ff6600';
+    if (inten >= 5) return '#ff9f1c';
+    if (inten >= 4) return '#ffcc00';
+    if (inten >= 3) return '#2ecc71';
+    if (inten >= 2) return '#00bcd4';
+    if (inten >= 1) return '#4fc3f7';
+    return '#555';
+  }
+  if (inten >= 12) return '#7a0000';
+  if (inten >= 11) return '#8b0000';
+  if (inten >= 10) return '#a00000';
+  if (inten >= 9) return '#c00000';
+  if (inten >= 8) return '#e00000';
+  if (inten >= 7) return '#ff0000';
+  if (inten >= 6) return '#ff4500';
+  if (inten >= 5) return '#ff6600';
+  if (inten >= 4) return '#ffcc00';
+  if (inten >= 3) return '#2ecc71';
+  if (inten >= 2) return '#00bcd4';
+  if (inten >= 1) return '#4fc3f7';
+  return '#555';
+}
+function getEventIntensity(e){
+  var val = 0;
+  var raw = (e.MaxIntensity !== undefined && e.MaxIntensity !== null && e.MaxIntensity !== '') ? e.MaxIntensity : 
+            ((e.epiIntensity !== undefined && e.epiIntensity !== null && e.epiIntensity !== '') ? e.epiIntensity : null);
+  if (raw !== null) {
+    var s = String(raw).replace(/[^0-9.]/g, '');
+    if (s !== '') {
+      var parsed = parseFloat(s);
+      if (!isNaN(parsed) && parsed > 0) val = parsed;
+    }
+  }
+  if (val <= 0) {
+    var mag = parseFloat(e.Magnitude) || 0;
+    var depth = parseFloat(e.Depth) || 10;
+    if (mag > 0) {
+      // 中国地震局常用震中烈度估算公式（含深度衰减）
+      val = 0.24 + 1.29 * mag - 0.1 * depth;
+    }
+  }
+  // 强制限制在 1 到 12 度之间
+  return Math.max(0, Math.min(12, val)); 
+}
+
+function updateTimes(){
+  var now = new Date();
+  var utcMs = now.getTime() + now.getTimezoneOffset() * 60000;
+  var jpD = new Date(utcMs + 9 * 3600000);
+  var cnD = new Date(utcMs + 8 * 3600000);
+  var jpT = pad2(jpD.getHours()) + ':' + pad2(jpD.getMinutes()) + ':' + pad2(jpD.getSeconds());
+  var cnT = pad2(cnD.getHours()) + ':' + pad2(cnD.getMinutes()) + ':' + pad2(cnD.getSeconds());
+  var a = document.getElementById('jp-time-val'); if(a) a.innerText = jpT;
+  var e = document.getElementById('cn-time-val'); if(e) e.innerText = cnT;
+}
+
+function getGlobalIndex(){
+  var total = 0, index = 0;
+  for (var i = 0; i < _groups.length; i++) {
+    total += _groups[i].length;
+    if (i < _curGroup) index += _groups[i].length;
+    else if (i === _curGroup) index += (_curIn % (_groups[i].length || 1));
+  }
+  return { n: index + 1, t: total || 1 };
+}
+
+var _infoIdx = 0;
+var _infoTimer = null;  // 已禁用
+
+function updateInfo(){
+  var box = document.getElementById('info');
+  var main = document.getElementById('info-main');
+  if(!box || !main) return;
+  var activeList = [];
+  var now = Date.now();
+  for (var i = 0; i < allEew.length; i++) {
+    var e = allEew[i];
+    var t0 = parseTime(e.OriginTime);
+    if (isNaN(t0)) continue;
+    var el = (now - t0) / 1000;
+    if (el >= 0 && el <= 600) activeList.push(e);
+  }
+  activeList.sort(function(a,b){ return (parseTime(b.OriginTime)||0) - (parseTime(a.OriginTime)||0); });
+  var seen = {}, finalList = [];
+  for (var j = 0; j < activeList.length; j++) {
+    var id = String(activeList[j].EventID || '');
+    if (seen[id]) continue;
+    seen[id] = 1;
+    finalList.push(activeList[j]);
+  }
+  if (finalList.length === 0) {
+    box.style.display = 'block';
+    main.innerHTML = '<div style="color:#aaa;font-size:14px;padding:6px 0;">当前暂无地震发生</div>';
+    return;
+  }
+  box.style.display = 'block';
+  if (_infoIdx >= finalList.length) _infoIdx = 0;
+  var e = finalList[_infoIdx];
+  var inten = getEventIntensity(e);
+  var isJP = String(e.type||'').toLowerCase().indexOf('jma') >= 0;
+  var intenColor = getIntensityColor(inten, isJP);
+  // 【彻底修复】强制转为阿拉伯数字整数，抛弃所有“弱/强”或小数逻辑
+  var intenText = String(Math.round(inten));
+  
+  // 【新增】烈度显示逻辑：日本用震度（弱/强），其他国家用整数阿拉伯数字
+  var intenText = String(Math.round(inten));
+  var _mg = parseFloat(e.Magnitude) || 0;
+  var cat = _mg >= 5.0 ? '警报' : '预报';
+  var catBg = _mg >= 5.0 ? '#e63946' : '#2a9d8f';
+  var rn = e.ReportNum || e.updates || 1;
+  var isFinal = e.isFinal || e.final || false;
+  var loc = cleanLoc(pickLoc(e));
+  var tagTxt = isFinal ? '最终报' : ('第'+rn+'报');
+  var cur = _infoIdx + 1;
+  var tot = finalList.length;
+  main.innerHTML =
+    '<div style="display:flex;align-items:center;gap:8px;">' +
+      '<div style="background:'+intenColor+';color:#fff;border-radius:6px;padding:6px 10px;min-width:52px;text-align:center;">' +
+        '<div style="font-size:10px;opacity:.85;">震级</div>' +
+        '<div style="font-size:18px;font-weight:bold;line-height:1;">'+ (typeof mag !== 'undefined' ? mag.toFixed(1) : (typeof _mg !== 'undefined' ? _mg.toFixed(1) : '?')) +'</div>' +
+      '</div>' +
+      '<div style="flex:1;min-width:0;">' +
+        '<div style="font-weight:bold;color:#fff;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-size:14px;">'+loc+'</div>' +
+        '<div style="font-size:12px;color:#999;margin-top:3px;">'+_getSrcName(e)+' · '+(e.Magnitude||'?')+' 级 · 深'+(e.Depth||'?')+'km · '+tagTxt+'</div>' +
+      '</div>' +
+      '<div style="display:flex;flex-direction:column;gap:4px;align-items:flex-end;">' +
+        '<span style="background:'+catBg+';color:#fff;padding:2px 8px;border-radius:3px;font-size:9px;font-weight:bold;">'+cat+'</span>' +
+        '<span style="background:#7209b7;color:#fff;padding:2px 8px;border-radius:3px;font-size:9px;font-weight:bold;">'+cur+'/'+tot+'</span>' +
+      '</div>' +
+    '</div>';
+}
+
+
+
+function buildQuakeGroups(){
+  var m = {};
+  for (var i = 0; i < allEew.length; i++) {
+    var e = allEew[i];
+    var id = String(e.EventID || e.id || '');
+    if (!id) continue;
+    if (!m[id]) m[id] = [];
+    m[id].push(e);
+  }
+  var groups = [
+    { name: '地震预警', list: ['WHEWS','GQ','USGS','CENC','JMA情报','CWA情报','JMA海啸','CWA_EWW','SA_EWW','KMA_EWW','EARLY_EST'] },
+    { name: '测站数据', list: ['kma测站','palert测站','trem测站','snet测站','nied测站'] },
+    { name: '地震情报(国内)', list: ['CEA','CEA_PR','CEA_ALL','CENC','CENC_INT','BEIJING','YUNNAN','NINGXIA','DZJ'] },
+    { name: '地震情报(国际)', list: ['KMA','BMKG','GEONET','TMD','USP','GFZ','INGV','USGS','EMSC','HKO','BCSF','NRCAN','MMD','PHIVOLCS','GA','CENAIS','GSRAS','BGS','IPMA','SSN','AFAD','SED','NOA','SCSN','IAG','IGP','NEPAL'] },
+    { name: '矩张量 CMT', list: ['CMT_USGS','CMT_EMSC','CMT_GFZ','CMT_INGV','CMT_CENC'] },
+    { name: '海啸', list: ['TSUNAMI_NMEFC','TSUNAMI_NTWC','TSUNAMI_PTWC','TSUNAMI_INCOIS','TSUNAMI_CAT','TSUNAMI_CWA','JMA_OKIAI'] },
+    { name: '其它', list: ['海啸','台风','火山','气象','自然灾害','小行星'] },
+];
+  for (var k in m) groups.push(m[k]);
+  groups.sort(function(a,b){
+    var ta = parseTime(a[a.length-1].OriginTime) || 0;
+    var tb = parseTime(b[b.length-1].OriginTime) || 0;
+    return tb - ta;
+  });
+  _groups = groups;
+}
+
+
+
+
+
+
+function updateRainTiles(){
+  if(!_rainTimestamp) return;
+  
+  _rainLayer = L.tileLayer('https://tilecache.rainviewer.com/v2/radar/' + _rainTimestamp + '/512/{z}/{x}/{y}/4/1_1.png', {
+    tileSize: 256,
+    opacity: 0.35,
+    maxZoom: 17,
+    zIndex: 1
+  }).addTo(map);
+}
+
+function drawWaves(){
+  if(!window.map || !window.events) return;
+  var now = Date.now();
+  var activeList = [];
+
+  for (var id in window.events) {
+      var e = window.events[id];
+      var la = parseFloat(e.Latitude || e.EPI_LAT);
+      var lo = parseFloat(e.Longitude || e.EPI_LON);
+      if (isNaN(la) || isNaN(lo) || (la === 0 && lo === 0)) continue;
+
+      var depth = parseFloat(e.Depth !== undefined ? e.Depth : (e.EPI_DEPTH || 0));
+      var t0 = parseTime(e.OriginTime || e.O_TIME);
+      if (isNaN(t0)) continue;
+
+      var el = (now - t0) / 1000;
+      if (el < 0) continue; 
+
+      var mag = parseFloat(e.Magnitude) || 5.0;
+      var pLife = 300; 
+      if (mag < 1.5) pLife = 60;
+      else if (mag < 2.5) pLife = 120;
+      else if (mag < 3.5) pLife = 180;
+      else if (mag < 4.5) pLife = 240;
+      else if (mag < 5.5) pLife = 300;
+      else if (mag < 6.5) pLife = 420;
+      else if (mag < 7.5) pLife = 540;
+      else if (mag < 8.5) pLife = 600;
+      else if (mag < 9.5) pLife = 660;
+      else pLife = 720;
+
+      var sLife = pLife;
+      var key = String(e.EventID || e.id || 'unknown');
+
+      if (el > sLife) {
+          if (waveCircles[key]) {
+              if (waveCircles[key].p) { window.map.removeLayer(waveCircles[key].p); waveCircles[key].p = null; }
+              if (waveCircles[key].s) { window.map.removeLayer(waveCircles[key].s); waveCircles[key].s = null; }
+              delete waveCircles[key];
+          }
+          continue;
+      }
+
+      activeList.push({
+          key: key, e: e, el: el, pLife: pLife, sLife: sLife,
+          la: la, lo: lo, depth: depth, mag: mag
+      });
+  }
+
+  // 颜色插值工具：从原色渐变为深灰
+  function fadeColor(hex, ratio){
+      // ratio: 0(原色) -> 1(几乎透明灰)
+      if (!hex || hex.charAt(0) !== '#') return hex;
+      var r = parseInt(hex.substr(1,2), 16);
+      var g = parseInt(hex.substr(3,2), 16);
+      var b = parseInt(hex.substr(5,2), 16);
+      // 混合到暗灰 (40,40,40)
+      var tr = 40, tg = 40, tb = 40;
+      r = Math.round(r * (1-ratio) + tr * ratio);
+      g = Math.round(g * (1-ratio) + tg * ratio);
+      b = Math.round(b * (1-ratio) + tb * ratio);
+      return 'rgb(' + r + ',' + g + ',' + b + ')';
+  }
+
+  for (var i = 0; i < activeList.length; i++) {
+      var item = activeList[i];
+      var key = item.key;
+      var el = item.el;
+      var la = item.la;
+      var lo = item.lo;
+      var depth = item.depth;
+
+      if (!waveCircles[key]) waveCircles[key] = {};
+      var c2 = waveCircles[key];
+
+      var intenColor = '#ffcc00';
+      if (typeof getIntensityColor === 'function' && typeof getEventIntensity === 'function') {
+          var inten = getEventIntensity(item.e);
+          intenColor = getIntensityColor(inten, false);
+      }
+      var maxRadius = 20000000;
+
+      // ===== P波（带颜色渐变动画） =====
+      if (el <= item.pLife) {
+          // P波生命进度 0~1
+          var pProgress = Math.min(1, el / item.pLife);
+          
+          // 前70%保持原色，后30%开始颜色渐变
+          var pColorRatio = 0;
+          if (pProgress > 0.7) {
+              pColorRatio = (pProgress - 0.7) / 0.3; // 0 -> 1
+          }
+          var pColor = fadeColor(intenColor, pColorRatio);
+          
+          // 透明度：前80%不变，后20%淡出
+          var pOpacity = 1;
+          if (pProgress > 0.8) {
+              pOpacity = 1 - (pProgress - 0.8) / 0.2; // 1 -> 0
+          }
+          pOpacity = Math.max(0, pOpacity);
+
+          // 线宽也随时间变细（从1.5到0.8）
+          var pWeight = 1.5 - pColorRatio * 0.7;
+          if (pWeight < 0.8) pWeight = 0.8;
+
+          var rP = el * 7.0 * 1000;
+          if (rP < 3000 && el < 10) rP = 3000;
+          if (rP > maxRadius) rP = maxRadius;
+          if (rP > 0) {
+              if (!c2.p) {
+                  c2.p = L.circle([la, lo], { 
+                      color: pColor, weight: pWeight, fill: false, radius: 0, 
+                      opacity: pOpacity, dashArray: '5, 5', interactive: false 
+                  }).addTo(window.map);
+              }
+              c2.p.setRadius(rP);
+              c2.p.setStyle({
+                  color: pColor,
+                  weight: pWeight,
+                  opacity: 0.7 * pOpacity
+              });
+          }
+      } else {
+          if (c2.p) { window.map.removeLayer(c2.p); c2.p = null; }
+      }
+
+      // ===== S波 =====
+      if (el <= item.sLife) {
+          var sOpacity = 1;
+          var sFadeStart = item.sLife * 0.95;
+          if (el > sFadeStart) sOpacity = Math.max(0, (item.sLife - el) / (item.sLife - sFadeStart));
+
+          var sDist = el * 4.0;
+          var rS = 0;
+          if (sDist > depth) rS = Math.sqrt(sDist * sDist - depth * depth) * 1000;
+          if (rS < 5000 && el < 10) rS = 5000;
+          if (rS > maxRadius) rS = maxRadius;
+          if (rS > 0) {
+              if (!c2.s) c2.s = L.circle([la, lo], { color: intenColor, weight: 2, fill: true, fillColor: intenColor, fillOpacity: 0.15, radius: 0, opacity: 1, interactive: false }).addTo(window.map);
+              c2.s.setStyle({ color: intenColor, fillColor: intenColor });
+              c2.s.setRadius(rS);
+              c2.s.setStyle({ opacity: sOpacity, fillOpacity: 0.15 * sOpacity });
+          }
+      } else {
+          if (c2.s) { window.map.removeLayer(c2.s); c2.s = null; }
+      }
+  }
+
+  // 自动缩放逻辑
+  if (typeof window._autoZoomLock === 'undefined') window._autoZoomLock = false;
+  if (typeof window._lastUserOpTime === 'undefined') window._lastUserOpTime = 0;
+  
+  if (!window._userOpBound && window.map) {
+      window._userOpBound = true;
+      window.map.on('zoomstart dragstart', function(){ window._lastUserOpTime = Date.now(); });
+  }
+  if (window._autoZoomLock || (now - window._lastUserOpTime) < 10000) return;
+
+  var focusItem = null;
+  if (window.current && window.events[window.current]) {
+      for (var k = 0; k < activeList.length; k++) {
+          if (String(window.events[window.current].EventID) === activeList[k].key) { focusItem = activeList[k]; break; }
+      }
+  }
+  if (!focusItem && activeList.length > 0) {
+      focusItem = activeList[0];
+      for (var m = 1; m < activeList.length; m++) {
+          if (activeList[m].el < focusItem.el) focusItem = activeList[m];
+      }
+  }
+
+  if (focusItem && focusItem.el * 7.0 > focusItem.depth && focusItem.el <= focusItem.pLife) {
+      var rS2 = Math.sqrt(Math.pow(focusItem.el * 7.0, 2) - Math.pow(focusItem.depth, 2)) * 1000;
+      if (rS2 > 20000000) rS2 = 20000000;
+      
+      var centerLatLng = L.latLng(focusItem.la, focusItem.lo);
+      var viewBounds = window.map.getBounds();
+      var viewRadius = centerLatLng.distanceTo(viewBounds.getNorthEast());
+
+      if (rS2 > viewRadius * 0.8 || (rS2 < viewRadius * 0.3 && rS2 > 50000)) {
+          window._autoZoomLock = true;
+          var targetBounds = centerLatLng.toBounds(Math.min(rS2 * 2 * 1.15, 20000000));
+          window.map.flyToBounds(targetBounds, { duration: 1.5, easeLinearity: 0.25 });
+          window.map.once('moveend', function(){ window._autoZoomLock = false; });
+          setTimeout(function(){ window._autoZoomLock = false; }, 2000);
+      }
+  }
+}
+
+
+
+updateTimes();
+refresh();
+updateTodayMax();
+</script>
+
+
+
+
+<div id="tabs">
+<button id="tabAll" onclick="switchTab(2)">全部</button>
+<button id="tabEew" onclick="switchTab(0)">地震预警</button>
+<button id="tabHist" onclick="switchTab(1)">地震历史</button>
+<button id="tabTyphoon" onclick="switchTab(3)">台风</button>
+<button id="tabVolcano" onclick="switchTab(4)">火山</button>
+<button id="tabWeather" onclick="switchTab(5)">气象</button>
+<button id="tabCheji" onclick="switchTab(6)">灾害</button>
+<button id="tabNea" onclick="switchTab(7)">小行星</button>
+<button id="tabTsunami2" onclick="switchTab(8)">海啸</button>
+<button id="tabStation" onclick="switchTab(9)">测站</button>
+<button id="tabSettings" onclick="toggleCfg()">设置</button>
+</div>
+
+<div id="cfg"></div>
+
+<script>
+// 让左下角面板可拖动
+(function(){
+  var ids = ['intensity-scale', 'typhoonStrengthBox', 'legend'];
+  ids.forEach(function(id){
+    var el = document.getElementById(id);
+    if(!el) return;
+    el.style.cursor = 'move';
+    el.addEventListener('mousedown', function(e){
+      if(e.target.tagName === 'INPUT' || e.target.tagName === 'BUTTON') return;
+      var startX = e.clientX, startY = e.clientY;
+      var startLeft = el.offsetLeft, startTop = el.offsetTop;
+      // 改成 top/left 定位
+      el.style.right = 'auto';
+      el.style.bottom = 'auto';
+      el.style.left = startLeft + 'px';
+      el.style.top = startTop + 'px';
+      function onMove(ev){
+        el.style.left = (startLeft + ev.clientX - startX) + 'px';
+        el.style.top = (startTop + ev.clientY - startY) + 'px';
+      }
+      function onUp(){
+        document.removeEventListener('mousemove', onMove);
+        document.removeEventListener('mouseup', onUp);
+        // 保存位置
+        try {
+          var pos = { left: el.style.left, top: el.style.top };
+          var saved = JSON.parse(localStorage.getItem('panel_pos') || '{}');
+          saved[id] = pos;
+          localStorage.setItem('panel_pos', JSON.stringify(saved));
+        } catch(ex){}
+      }
+      document.addEventListener('mousemove', onMove);
+      document.addEventListener('mouseup', onUp);
+      e.preventDefault();
+    });
+  });
+})();
+</script>
+
+<script>
+(function(){
+  try {
+    var saved = JSON.parse(localStorage.getItem('panel_pos') || '{}');
+    for(var id in saved){
+      var el = document.getElementById(id);
+      if(el){
+        el.style.right = 'auto';
+        el.style.bottom = 'auto';
+        el.style.left = saved[id].left;
+        el.style.top = saved[id].top;
+      }
+    }
+  } catch(ex){}
+})();
+</script>
+
+
+
+
+</div>
+
+
+<script>
+// 强制清理重复的旧图层变量，防止地图上出现多个重叠图标
+(function(){
+    if (window._stationLayer) {
+        map.removeLayer(window._stationLayer);
+        window._stationLayer = L.layerGroup().addTo(map);
+    }
+    if (window._typhoonLayer) {
+        map.removeLayer(window._typhoonLayer);
+        window._typhoonLayer = L.layerGroup().addTo(map);
+    }
+    if (window._volcanoLayer) {
+        map.removeLayer(window._volcanoLayer);
+        window._volcanoLayer = L.layerGroup().addTo(map);
+    }
+    if (window._tsunamiMarkerLayer) {
+        map.removeLayer(window._tsunamiMarkerLayer);
+        window._tsunamiMarkerLayer = L.layerGroup().addTo(map);
+    }
+})();
+</script>
+<script>
+// ===== 晨昏线逻辑 =====
+(function initTerminator() {
+    if (typeof map === 'undefined') return; // 防止地图未加载完成时报错
+    
+    var _terminatorLayer = null;
+
+    function getNightPolygon() {
+        var now = new Date();
+        var rad = Math.PI / 180;
+        var day = now.getTime() / 86400000 + 2440587.5;
+        var n = day - 2451545.0;
+        var L = 280.460 + 0.9856474 * n;
+        var g = 357.528 + 0.9856003 * n;
+        var lambda = L + 1.915 * Math.sin(g * rad) + 0.020 * Math.sin(2 * g * rad);
+        var epsilon = 23.439 - 0.0000004 * n;
+        var delta = Math.asin(Math.sin(epsilon * rad) * Math.sin(lambda * rad)); // 太阳赤纬
+        var hourAngle = (now.getUTCHours() - 12) * 15 * rad; // 格林尼治时角
+
+        var poly = [];
+        for (var lon = -180; lon <= 180; lon += 5) {
+            var H = (lon * rad) + hourAngle;
+            var lat = Math.atan(-Math.cos(H) / Math.tan(delta)) / rad;
+            // 避免计算出的纬度超出边界
+            lat = Math.max(-85, Math.min(85, lat));
+            poly.push([lat, lon]);
+        }
+        
+        // 封闭多边形，覆盖背向太阳的极地部分
+        if (delta > 0) {
+            // 北半球夏天，南极极夜，遮罩下边缘
+            poly.push([-85, 180]);
+            poly.push([-85, -180]);
+        } else {
+            // 北半球冬天，北极极夜，遮罩上边缘
+            poly.push([85, 180]);
+            poly.push([85, -180]);
+        }
+        return poly;
+    }
+
+    function updateTerminator() {
+        var poly = getNightPolygon();
+        if (_terminatorLayer) {
+            map.removeLayer(_terminatorLayer);
+        }
+        _terminatorLayer = L.polygon(poly, {
+            color: '#ffffff',
+            weight: 1,
+            opacity: 0.5,
+            fillColor: '#ffffff',
+            fillOpacity: 0.25,
+            interactive: false // 防止遮挡地图点击事件
+        }).addTo(map);
+    }
+
+    // 启动时更新一次，后续每 5 分钟更新一次
+    // 延迟 3 秒后绘制一次晨昏线，之后每 10 分钟更新一次（降低 CPU 占用）
+    setTimeout(updateTerminator, 3000);
+    setInterval(updateTerminator, 600000);
+})();
+</script>
+
+<style>
+@keyframes eew-blink {
+  0% { opacity: 1; }
+  50% { opacity: 0.2; }
+  100% { opacity: 1; }
+}
+.eew-blink-icon {
+  animation: eew-blink 0.8s infinite;
+}
+</style>
+
+<script>
+// ===== 地震预警叉号闪烁逻辑 =====
+(function initEEWBlink() {
+    if (typeof map === 'undefined' || typeof markers === 'undefined') return;
+    
+    setInterval(function() {
+        for (var id in markers) {
+            var m = markers[id];
+            if (!m || !m.options || !m.options.icon || !m.options.icon.options) continue;
+            
+            // 只处理地震预警的叉号图标
+            var html = m.options.icon.options.html || '';
+            if (html.indexOf('✕') === -1) continue;
+            
+            var evt = events[id];
+            if (!evt) continue;
+            
+            var active = typeof isActiveEEW === 'function' ? isActiveEEW(evt) : false;
+            
+            // 活跃时加闪烁类，不活跃时去掉
+            if (active) {
+                if (html.indexOf('eew-blink-icon') === -1) {
+                    var newHtml = html.replace('<div style="', '<div class="eew-blink-icon" style="');
+                    m.setIcon(L.divIcon({
+                        className: '',
+                        html: newHtml,
+                        iconSize: [22, 22],
+                        iconAnchor: [11, 11]
+                    }));
+                }
+            } else {
+                if (html.indexOf('eew-blink-icon') !== -1) {
+                    var cleanHtml = html.replace('class="eew-blink-icon" ', '').replace('class="eew-blink-icon"', '');
+                    m.setIcon(L.divIcon({
+                        className: '',
+                        html: cleanHtml,
+                        iconSize: [22, 22],
+                        iconAnchor: [11, 11]
+                    }));
+                }
+            }
+        }
+    }, 500);
+})();
+</script>
+<div style="position:fixed;right:12px;bottom:12px;z-index:99999;color:#00e676;font-weight:bold;font-size:12px;background:rgba(0,0,0,0.7);padding:2px 8px;border-radius:4px;">v3.3.1</div>
+
+<script>
+// ===== 自定义声音管理 =====
+window._customSounds = {};
+
+function uploadSound(input, type) {
+    var file = input.files[0];
+    if (!file) return;
+    var reader = new FileReader();
+    reader.onload = function(e) {
+        window._customSounds[type] = e.target.result;
+        localStorage.setItem('sound_' + type, e.target.result);
+        if(window.showNotice)window.showNotice(String(type + ' 自定义声音已保存（需刷新页面生效）'),'#ffcc00');
+    };
+    reader.readAsDataURL(file);
+}
+
+function resetSounds() {
+    
+    ['new_eew','update_eew','hist'].forEach(function(t){
+        localStorage.removeItem('sound_' + t);
+        delete window._customSounds[t];
+    });
+    if (window.showNotice) window.showNotice('已恢复默认声音，请刷新页面。', '#ffcc00');
+}
+
+// 页面加载时读取自定义声音
+(function loadCustomSounds(){
+    ['new_eew','update_eew','hist'].forEach(function(t){
+        var saved = localStorage.getItem('sound_' + t);
+        if (saved) window._customSounds[t] = saved;
+    });
+})();
+</script>
+
+<script>
+function verifyAdminForSound() {
+  var input = document.getElementById('sound-admin-pwd');
+  var tip = document.getElementById('sound-pwd-tip');
+  if (!input) return;
+  if (input.value !== '142857') {
+    if (tip) { tip.innerText = '密码错误'; tip.style.color = '#ff5252'; }
+    return;
+  }
+  if (tip) { tip.innerText = '解锁成功'; tip.style.color = '#00e676'; }
+}
+</script>
+
+<script>
+function verifyAdminForSim() {
+  var input = document.getElementById('sim-admin-pwd');
+  var tip = document.getElementById('sim-pwd-tip');
+  if (!input) return;
+  if (input.value !== '142857') {
+    if (tip) { tip.innerText = '密码错误，请重新输入'; tip.style.color = '#ff5252'; }
+    if (window.showNotice) window.showNotice('密码错误，无法使用地震模拟。', '#ffcc00');
+    return;
+  }
+  if (tip) { tip.innerText = '解锁成功'; tip.style.color = '#00e676'; }
+  var panel = document.getElementById('sim-panel');
+  if (panel) panel.style.display = 'flex';
+}
+</script>
+
+<script>
+function saveNewToken() {
+    var input = document.getElementById('cfg-token-input');
+    if (!input) return;
+    var token = input.value.trim();
+    if (!token.startsWith('wat_')) {
+        if (window.showNotice) window.showNotice('Token 格式不对，应该以 wat_ 开头', '#ffcc00');
+        return;
+    }
+    fetch(API_BASE + '/set_token', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({token: token})
+    }).then(function(r){ return r.json(); }).then(function(d){
+        if (d.ok) {
+            if (window.showNotice) window.showNotice('Token 已保存！后台连接可能需要 1-2 分钟重新生效。\n重启软件后立即生效。', '#ffcc00');
+        } else {
+            alert("保存失败: " + (d.msg || '未知错误'));
+        }
+    }).catch(function(e){
+        alert("请求失败: " + e);
+    });
+}
+
+function loadCurrentToken() {
+    fetch(API_BASE + '/get_token').then(function(r){ return r.json(); }).then(function(d){
+        var input = document.getElementById('cfg-token-input');
+        if (input && d.token) {
+            input.value = '';
+        }
+    }).catch(function(){});
+}
+</script>
+
+<script>
+function autoSaveToken() {
+    var input = document.getElementById('cfg-token-input');
+    if (!input) return;
+    var token = input.value.trim();
+    if (!token || !token.startsWith('wat_')) return;
+
+    // 防抖：500ms 内不再重复提交
+    if (window._tokenSaveTimer) clearTimeout(window._tokenSaveTimer);
+    window._tokenSaveTimer = setTimeout(function(){
+        fetch(API_BASE + '/set_token', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({token: token})
+        }).then(function(r){ return r.json(); }).then(function(d){
+            if (d.ok) {
+                console.log('✅ Token 已自动保存到后台');
+                // 在输入框旁边加个小提示
+                var tip = document.getElementById('token-save-tip');
+                if (tip) {
+                    tip.innerText = '已保存';
+                    tip.style.color = '#00e676';
+                    setTimeout(function(){ tip.innerText = ''; }, 2000);
+                }
+            }
+        }).catch(function(e){
+            console.log('自动保存失败:', e);
+        });
+    }, 500);
+}
+</script>
+<script>
+window.addEventListener('load', function(){
+    setTimeout(function(){
+        if (typeof loadCurrentToken === 'function') loadCurrentToken();
+    }, 1000);
+});
+</script>
+
+</div>
+
+<div id="intensity-legend" style="position:fixed;left:12px;bottom:12px;z-index:9999;background:rgba(0,0,0,.88);border-radius:6px;padding:6px 8px;font-size:10px;color:#fff;box-sizing:border-box;">
+  <div style="font-weight:bold;margin-bottom:4px;font-size:11px;color:#aaa;text-align:center;">图例</div>
+  <div style="display:flex;gap:10px;align-items:flex-end;">
+    <div style="display:flex;flex-direction:column;gap:1px;">
+      <div style="font-weight:bold;font-size:10px;color:#aaa;text-align:center;">震级</div>
+      <div id="legend-cn" style="display:flex;flex-direction:column;gap:1px;"></div>
+    </div>
+    <div style="display:flex;flex-direction:column;gap:1px;">
+      <div style="font-weight:bold;font-size:10px;color:#aaa;text-align:center;">震度</div>
+      <div id="legend-jp" style="display:flex;flex-direction:column;gap:1px;"></div>
+    </div>
+    <div style="display:flex;flex-direction:column;gap:1px;">
+      <div style="font-weight:bold;font-size:10px;color:#aaa;text-align:center;">台风</div>
+      <div id="legend-ty" style="display:flex;flex-direction:column;gap:1px;"></div>
+    </div>
+  </div>
+</div>
+<script>
+(function renderIntensityLegend(){
+    var romanMap = ['0','I','II','III','IV','V','VI','VII','VIII','IX','X','XI','XII'];
+    
+    function drawLegend(){
+        // 左侧：中国烈度
+        var cnBox = document.getElementById('legend-cn');
+        if(cnBox){
+            var cnHtml = '';
+            for(var i=12; i>=0; i--){
+                var color = typeof getIntensityColor === 'function' ? getIntensityColor(i, false) : '#555';
+                cnHtml += '<div style="display:flex;align-items:center;gap:3px;">' +
+                          '<span style="color:#ccc;width:22px;text-align:right;font-size:9px;">'+romanMap[i]+'</span>' +
+                          '<div style="width:14px;height:8px;background:'+color+';border-radius:1px;"></div>' +
+                          '</div>';
+            }
+            cnBox.innerHTML = cnHtml;
+        }
+
+        // 中间：日本震度
+        var jpBox = document.getElementById('legend-jp');
+        if(jpBox){
+            var jpList = [
+                { txt: '7', val: 7 }, { txt: '6強', val: 6.5 }, { txt: '6弱', val: 6 },
+                { txt: '5強', val: 5.5 }, { txt: '5弱', val: 5 }, { txt: '4', val: 4 },
+                { txt: '3', val: 3 }, { txt: '2', val: 2 }, { txt: '1', val: 1 },
+                { txt: '0', val: 0 }, { txt: '-1', val: -1 }, { txt: '-2', val: -2 }, { txt: '-3', val: -3 }
+            ];
+            var jpHtml = '';
+            for(var j=0; j<jpList.length; j++){
+                var item = jpList[j];
+                var color = typeof getIntensityColor === 'function' ? getIntensityColor(item.val, true) : '#555';
+                jpHtml += '<div style="display:flex;align-items:center;gap:3px;">' +
+                          '<span style="color:#ccc;width:20px;text-align:right;font-size:9px;">'+item.txt+'</span>' +
+                          '<div style="width:14px;height:8px;background:'+color+';border-radius:1px;"></div>' +
+                          '</div>';
+            }
+            jpBox.innerHTML = jpHtml;
+        }
+
+        // 右侧：台风强度
+        var tyBox = document.getElementById('legend-ty');
+        if(tyBox){
+            var tyList = [
+                { txt: '超强台风', color: '#8b00ff' },
+                { txt: '强台风',   color: '#ff0000' },
+                { txt: '台风',     color: '#ff8800' },
+                { txt: '强热带风暴', color: '#ffcc00' },
+                { txt: '热带风暴', color: '#00aaff' },
+                { txt: '热带低压', color: '#00cc00' }
+            ];
+            var tyHtml = '';
+            for(var k=0; k<tyList.length; k++){
+                var t = tyList[k];
+                tyHtml += '<div style="display:flex;align-items:center;gap:3px;">' +
+                          '<span style="color:#ccc;width:62px;text-align:right;font-size:9px;">'+t.txt+'</span>' +
+                          '<div style="width:14px;height:8px;background:'+t.color+';border-radius:1px;"></div>' +
+                          '</div>';
+            }
+            tyBox.innerHTML = tyHtml;
+        }
+    }
+    setTimeout(drawLegend, 500);
+    setInterval(drawLegend, 10000);
+})();
+</script>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<script>
+// ===== Quake 核心逻辑（完整版：拉数据 + 渲染 + 报数 + 点击跳转 + 标签切换） =====
+(function(){
+    console.log('✅ Quake 核心逻辑注入');
+
+    function parseT(s){
+        if(!s) return NaN;
+        var t = new Date(String(s).replace(/-/g,'/').replace('T',' '));
+        return t.getTime();
+    }
+
+    // ---------- 1. 渲染列表 ----------
+    window.render = function(arr){
+        var side = document.getElementById('side');
+        if (!side) return;
+
+        // 清理地图标记图层
+        if (!window._quakeMarkerLayer) {
+            window._quakeMarkerLayer = L.layerGroup().addTo(window.map);
+        }
+        window._quakeMarkerLayer.clearLayers();
+
+        if (!arr || arr.length === 0) {
+            side.innerHTML = '<div style="padding:20px;color:#888;text-align:center;">暂无数据<br><span style="font-size:12px;color:#aaa;">（等待后台推送，或点击“设置 -> 模拟”发送测试数据）</span></div>';
+            return;
+        }
+
+        var htmlStr = '';
+        for (var i = 0; i < arr.length && i < 300; i++) {
+            var e = arr[i];
+            var la = parseFloat(e.Latitude || e.EPI_LAT);
+            var lo = parseFloat(e.Longitude || e.EPI_LON);
+            if (isNaN(la) || isNaN(lo) || (la === 0 && lo === 0)) continue;
+
+            var id = String(e.EventID || e.id || 'e_' + i);
+            window.events[id] = e;
+
+            var eType = e._kind || e.type || 'quake';
+            var isEew = eType === 'eew' || String(e.type).toUpperCase().indexOf('EEW') >= 0 || eType === '预警';
+
+            // 地图标记
+            if (isEew) {
+                L.marker([la, lo], {icon: L.divIcon({className:'',
+                    html:'<div style="color:#ff2d2d;font-size:22px;font-weight:bold;line-height:22px;text-align:center;text-shadow:0 0 3px #000">✕</div>',
+                    iconSize:[22,22], iconAnchor:[11,11]})}).addTo(window._quakeMarkerLayer);
+            } else {
+                L.circleMarker([la, lo], {radius:4, color:'#ffb703', fillColor:'#ffb703', fillOpacity:0.85, weight:1}).addTo(window._quakeMarkerLayer);
+            }
+
+            var cat = eType === 'tsunami' ? '海啸' : (eType === 'typhoon' ? '台风' : (isEew ? '预警' : '历史'));
+            var catBg = eType === 'tsunami' ? '#1e6fd9' : (eType === 'typhoon' ? '#ff2d2d' : (isEew ? '#e63946' : '#457b9d'));
+
+            var rawTime = e.OriginTime || e.O_TIME || e.shockTime || e.starttime || '';
+            var timeStr = rawTime ? String(rawTime).slice(0, 19).replace('T', ' ') : '--';
+
+            var locStr = e.HypoCenter || e.LOCATION_C || e.title || e.subtitle || '未知';
+            var extraStr = parseFloat(e.Depth) > 0 ? '深' + e.Depth + 'km' : (e.origin || '');
+            var magStr = (eType === 'quake' || isEew) && parseFloat(e.Magnitude) > 0 ? 'M' + parseFloat(e.Magnitude).toFixed(1) : '';
+
+            // 报数标签
+            var rn = e.ReportNum || e.updates || e.reportNum || 1;
+            var isFinal = e.isFinal || e.final || false;
+            var tag = '';
+            if (isEew) {
+                if (isFinal) {
+        var isJMA = String(e.type || '').toUpperCase().indexOf('JMA') >= 0 || String(e.HypoCenter || '').toUpperCase().indexOf('JMA') >= 0;
+        if (isJMA) {
+            tag = '<span class="badge" style="background:#f4a261;color:#000;flex-shrink:0;white-space:nowrap;">最终第' + rn + '报</span>';
+        } else {
+            tag = '<span class="badge" style="background:#f4a261;color:#000;flex-shrink:0;white-space:nowrap;">最终报</span>';
+        }
+    }
+                else tag = '<span class="badge" style="background:#2a9d8f;color:#fff;flex-shrink:0;white-space:nowrap;">第' + rn + '报</span>';
+            }
+
+            htmlStr += '<div class="item" data-id="' + id + '" style="white-space:nowrap;cursor:pointer;" onclick="window.flyToQuake && window.flyToQuake(\'' + id + '\')">' +
+              '<div style="display:flex;gap:5px;align-items:center;flex-wrap:nowrap;">' +
+                '<span class="badge" style="background:' + catBg + ';flex-shrink:0;white-space:nowrap;">' + cat + '</span>' +
+                (magStr ? '<span class="badge b-mag" style="flex-shrink:0;white-space:nowrap;">' + magStr + '</span>' : '') +
+                '<span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;min-width:0;color:#fff;">' + locStr + '</span>' +
+                (tag ? tag : '') +
+              '</div>' +
+              '<div class="meta" style="margin-top:2px;">' + timeStr + (extraStr ? ' · ' + extraStr : '') + '</div>' +
+            '</div>';
+        }
+        side.innerHTML = htmlStr || '<div style="padding:20px;color:#888;text-align:center;">暂无有效数据</div>';
+    };
+
+    // ---------- 2. 组织数据（去重） ----------
+    window.renderCurrent = function(){
+        var tabIdx = window.tab !== undefined ? window.tab : 2;
+        var list = [];
+
+        if (tabIdx === 0) {
+            list = (window.allEew || []).filter(function(e){ return e._kind === 'eew' || String(e.type).indexOf('EEW') >= 0; });
+        } else if (tabIdx === 1) {
+            list = window.allHist || [];
+        } else {
+            list = (window.allEew || []).concat(window.allHist || []);
+        }
+
+        var valid = [], seen = {};
+        for (var i = 0; i < list.length; i++) {
+            var e = list[i];
+            var la = parseFloat(e.Latitude || e.EPI_LAT);
+            var lo = parseFloat(e.Longitude || e.EPI_LON);
+            if (isNaN(la) || isNaN(lo) || (la === 0 && lo === 0)) continue;
+
+            var timeKey = String(e.OriginTime || e.O_TIME || e.shockTime || '').slice(0, 13);
+            var dedupKey = la.toFixed(1) + '_' + lo.toFixed(1) + '_' + timeKey;
+            if (seen[dedupKey]) continue;
+            seen[dedupKey] = 1;
+            valid.push(e);
+        }
+
+        // 【核心】按时间降序排列，最新的在最上面
+        valid.sort(function(a,b){
+            var ta = new Date(String(a.OriginTime || a.O_TIME || a.shockTime || '').replace(/-/g,'/').replace('T',' ')).getTime() || 0;
+            var tb = new Date(String(b.OriginTime || b.O_TIME || b.shockTime || '').replace(/-/g,'/').replace('T',' ')).getTime() || 0;
+            return tb - ta;
+        });
+
+        window.render(valid);
+    };
+
+    // ---------- 3. 点击跳转 ----------
+    window.flyToQuake = function(id){
+        var evt = window.events[id];
+        if (!evt) return;
+        var lat = parseFloat(evt.Latitude || evt.EPI_LAT);
+        var lon = parseFloat(evt.Longitude || evt.EPI_LON);
+        if (!isNaN(lat) && !isNaN(lon) && lat !== 0 && lon !== 0) {
+            window.current = id;
+            window.map.flyTo([lat, lon], 8, {duration: 0.8});
+        }
+    };
+
+    // ---------- 4. 拉数据（关键，之前丢了） ----------
+    window.refresh = function(){
+        var base = (function(){
+            try { return localStorage.getItem('api_base') || 'http://127.0.0.1:18080'; }
+            catch(e) { return 'http://127.0.0.1:18080'; }
+        })();
+
+        Promise.all([
+            fetch(base + '/all_eew').then(function(r){ return r.json(); }).catch(function(){ return []; }),
+            fetch(base + '/history').then(function(r){ return r.json(); }).catch(function(){ return {}; })
+        ]).then(function(res){
+            var eew = res[0] || [];
+            if (!Array.isArray(eew)) eew = [];
+            for (var i = 0; i < eew.length; i++) {
+                var e = eew[i];
+                var hypo = String(e.HypoCenter || '').toUpperCase();
+                var t = String(e.type || '').toUpperCase();
+                if (t.indexOf('TSUNAMI') >= 0 || hypo.indexOf('TSUNAMI') >= 0) e._kind = 'tsunami';
+                else e._kind = 'eew';
+            }
+            window.allEew = eew;
+
+            var h = res[1] || {};
+            var rawHist = Array.isArray(h) ? h : (h.shuju || h.data || h.list || []);
+            window.allHist = rawHist.slice(0, 500);
+
+            // 刷新当前标签
+            if (window.tab === 2 || window.tab === 0 || window.tab === 1) {
+                window.renderCurrent();
+            }
+        }).catch(function(e){ console.warn('refresh error', e); });
+    };
+
+    // ---------- 5. 标签切换 ----------
+    window.switchTab = function(t){
+        window.tab = t;
+        var ids = ['tabAll','tabEew','tabHist','tabTyphoon','tabVolcano','tabWeather','tabCheji','tabNea','tabTsunami2','tabStation'];
+        for (var i = 0; i < ids.length; i++) {
+            var b = document.getElementById(ids[i]);
+            if (b) b.className = '';
+        }
+        var map2 = {0:'tabEew', 1:'tabHist', 2:'tabAll', 3:'tabTyphoon', 4:'tabVolcano', 5:'tabWeather', 6:'tabCheji', 7:'tabNea', 8:'tabTsunami2', 9:'tabStation'};
+        if (map2[t]) {
+            var b2 = document.getElementById(map2[t]);
+            if (b2) b2.className = 'on';
+        }
+
+        if (t === 2 || t === 0 || t === 1) {
+            window.renderCurrent();
+            return;
+        }
+
+        if (t === 3) {
+            if (window.fetchTyphoonPanel) window.fetchTyphoonPanel();
+            return;
+        }
+
+        var side = document.getElementById('side');
+        var endpoints = {9:'/stations', 4:'/volcano', 5:'/weather', 6:'/cheji', 7:'/nea', 8:'/tsunami'};
+        if (endpoints[t]) {
+            if (window.renderCurrent) window.renderCurrent();
+        };
+                    }
+                }
+            }).catch(function(){
+                if (side) side.innerHTML = '<div style="padding:20px;color:#ff5252;text-align:center;">加载失败</div>';
+            });
+        }
+    };
+
+    // ---------- 6. 启动 ----------
+    // 确保 events 对象存在
+    window.events = window.events || {};
+
+    // 每5秒拉一次数据
+    
+    // 首次立刻执行
+    
+
+    console.log('✅ Quake 核心逻辑启动完成');
+})();
+</script>
+
+
+<script>
+// ===== 统一的定时器管理（合并刷新，避免重复请求） =====
+(function(){
+    // 每 5 秒拉取一次后端数据并刷新列表
+    setInterval(function(){ 
+        if (window.refresh) window.refresh(); 
+    }, 5000);
+
+    // 每 300 毫秒重绘一次地震波（300ms 足够流畅，且不卡顿）
+    setInterval(function(){ 
+        if (window.drawWaves) window.drawWaves(); 
+    }, 300);
+
+    // 每 5 秒更新一次测站信息
+    setInterval(function(){ 
+        if (window.updateStationIntensity) window.updateStationIntensity(); 
+    }, 5000);
+
+    // 启动时立即执行一次
+    setTimeout(function(){
+        if (window.refresh) window.refresh();
+    }, 500);
+})();
+</script>
+
+
+<script>
+// ===== 独立的地图标记 + 地震波绘制（不依赖任何原有函数） =====
+(function boot(){
+    // 等地图初始化完成
+    if (!window.map || !window.L) { 
+        setTimeout(boot, 500); 
+        return; 
+    }
+    
+    console.log('✅ 独立绘制脚本启动');
+    
+    window.events = window.events || {};
+    
+    // 独立图层组
+    var _markerLayer = L.layerGroup().addTo(window.map);
+    var _waveCircles = {};
+    
+    // ---------- 画标记 ----------
+    function drawMarkers(){
+        var eew = window.allEew || [];
+        var hist = window.allHist || [];
+        var all = eew.concat(hist);
+        if (!all.length) return;
+        
+        _markerLayer.clearLayers();
+        
+        for (var i = 0; i < all.length; i++){
+            var e = all[i];
+            var la = parseFloat(e.Latitude || e.EPI_LAT);
+            var lo = parseFloat(e.Longitude || e.EPI_LON);
+            if (isNaN(la) || isNaN(lo) || (la === 0 && lo === 0)) continue;
+            
+            var id = String(e.EventID || e.id || 'e_' + i);
+            window.events[id] = e;
+            
+            var eType = String(e._kind || e.type || '').toLowerCase();
+            var hypo = String(e.HypoCenter || '').toUpperCase();
+            var isEew = eType.indexOf('eew') >= 0 || hypo.indexOf('EEW') >= 0 || hypo.indexOf('JMA') >= 0 || hypo.indexOf('CWA') >= 0 || hypo.indexOf('KMA') >= 0;
+            
+            if (isEew){
+                L.marker([la, lo], {icon: L.divIcon({className:'', 
+                    html:'<div style="color:#ff2d2d;font-size:22px;font-weight:bold;line-height:22px;text-align:center;text-shadow:0 0 3px #000">✕</div>', 
+                    iconSize:[22,22], iconAnchor:[11,11]})}).addTo(_markerLayer);
+            } else {
+                L.circleMarker([la, lo], {radius:4, color:'#ffb703', fillColor:'#ffb703', fillOpacity:0.85, weight:1}).addTo(_markerLayer);
+            }
+        }
+    }
+    
+    // ---------- 画地震波 ----------
+    function drawWaves(){
+        var now = Date.now();
+        var hasAny = false;
+        
+        for (var id in window.events) {
+            var e = window.events[id];
+            if (!e) continue;
+            var la = parseFloat(e.Latitude || e.EPI_LAT);
+            var lo = parseFloat(e.Longitude || e.EPI_LON);
+            if (isNaN(la) || isNaN(lo) || (la === 0 && lo === 0)) continue;
+            
+            var timeStr = e.OriginTime || e.O_TIME || e.shockTime || '';
+            var t0 = new Date(String(timeStr).replace(/-/g,'/').replace('T',' ')).getTime();
+            if (isNaN(t0)) continue;
+            
+            var el = (now - t0) / 1000;
+            if (el < 0) continue;
+            
+            var mag = parseFloat(e.Magnitude) || 5.0;
+            var pLife = 300;
+            if (mag < 1.5) pLife = 60;
+            else if (mag < 2.5) pLife = 120;
+            else if (mag < 3.5) pLife = 180;
+            else if (mag < 4.5) pLife = 240;
+            else if (mag < 5.5) pLife = 300;
+            else if (mag < 6.5) pLife = 420;
+            else if (mag < 7.5) pLife = 540;
+            else if (mag < 8.5) pLife = 600;
+            else if (mag < 9.5) pLife = 660;
+            else pLife = 720;
+            
+            var sLife = pLife;
+            
+            if (el > sLife) {
+                if (_waveCircles[id]) {
+                    if (_waveCircles[id].p) { window.map.removeLayer(_waveCircles[id].p); _waveCircles[id].p = null; }
+                    if (_waveCircles[id].s) { window.map.removeLayer(_waveCircles[id].s); _waveCircles[id].s = null; }
+                    delete _waveCircles[id];
+                }
+                continue;
+            }
+            hasAny = true;
+            
+            if (!_waveCircles[id]) _waveCircles[id] = {};
+            var c = _waveCircles[id];
+            var depth = parseFloat(e.Depth) || 0;
+            
+            // 烈度颜色
+            var intenColor = '#ffcc00';
+            try {
+                if (typeof getIntensityColor === 'function' && typeof getEventIntensity === 'function') {
+                    intenColor = getIntensityColor(getEventIntensity(e), false);
+                }
+            } catch(ex){}
+            
+            // P波
+            if (el <= pLife) {
+                var pOpacity = 1;
+                if (el > pLife * 0.8) pOpacity = Math.max(0, 1 - (el - pLife * 0.8) / (pLife * 0.2));
+                var rP = el * 7.0 * 1000;
+                if (rP < 3000 && el < 10) rP = 3000;
+                if (rP > 20000000) rP = 20000000;
+                if (!c.p) c.p = L.circle([la, lo], {color:'#ffffff', weight:1.5, fill:true, radius:0, opacity:0.6, dashArray:'5, 5', interactive:false}).addTo(window.map);
+                c.p.setRadius(rP);
+                c.p.setStyle({opacity: 0.6 * pOpacity, fillOpacity: 0.10});
+            } else {
+                if (c.p) { window.map.removeLayer(c.p); c.p = null; }
+            }
+            
+            // S波
+            if (el <= sLife) {
+                var sOpacity = 1;
+                if (el > sLife * 0.95) sOpacity = Math.max(0, 1 - (el - sLife * 0.95) / (sLife * 0.05));
+                var sDist = el * 4.0;
+                var rS = 0;
+                if (sDist > depth) rS = Math.sqrt(sDist * sDist - depth * depth) * 1000;
+                if (rS < 5000 && el < 10) rS = 5000;
+                if (rS > 20000000) rS = 20000000;
+                if (!c.s) c.s = L.circle([la, lo], {color:intenColor, weight:2, fill:true, fillColor:intenColor, fillOpacity:0.15, radius:0, opacity:1, interactive:false}).addTo(window.map);
+                var sProgress = Math.min(1, el / sLife);
+            var sColorRatio = 0;
+            if (sProgress > 0.7) sColorRatio = (sProgress - 0.7) / 0.3;
+            var sColor = fadeColor(intenColor, sColorRatio);
+            c.s.setStyle({color:sColor, fillColor:sColor});
+                c.s.setRadius(rS);
+                c.s.setStyle({opacity: sOpacity, fillOpacity: 0.15 * sOpacity});
+            } else {
+                if (c.s) { window.map.removeLayer(c.s); c.s = null; }
+            }
+        }
+        
+        // 没有活跃波时，清空所有残影
+        if (!hasAny) {
+            for (var k in _waveCircles) {
+                if (_waveCircles[k].p) window.map.removeLayer(_waveCircles[k].p);
+                if (_waveCircles[k].s) window.map.removeLayer(_waveCircles[k].s);
+                delete _waveCircles[k];
+            }
+        }
+    }
+    
+    setInterval(drawMarkers, 500);
+    setInterval(drawWaves, 300);
+    
+    // 立即执行一次
+    setTimeout(function(){ drawMarkers(); drawWaves(); }, 500);
+    
+    console.log('✅ 独立绘制已启动：标记 500ms / 波 300ms');
+})();
+</script>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<script>
+// ===== 禁用测站摇晃区域 =====
+(function(){
+    function kill(){
+        if (window._shakeLayer && window.map) {
+            try { window.map.removeLayer(window._shakeLayer); } catch(e){}
+            window._shakeLayer = null;
+        }
+    }
+    kill();
+    setInterval(kill, 3000);
+    console.log('OK 测站摇晃区域已禁用');
+})();
+</script>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<script>
+// ===== 数据源面板（自动创建容器） =====
+(function(){
+    window._srcGroups = [
+        { name: '地震预警', list: ['WHEWS','GQ','USGS','CENC','JMA情报','CWA情报','JMA海啸','CWA_EWW','SA_EWW','KMA_EWW','EARLY_EST'] },
+        { name: '测站数据', list: ['nied测站','snet测站','kma_station测站','palert测站','trem测站'] },
+        { name: '地震情报(国内)', list: ['CEA','CEA_PR','CEA_ALL','CENC','CENC_INT','BEIJING','YUNNAN','NINGXIA','DZJ'] },
+        { name: '地震情报(国际)', list: ['KMA','BMKG','GEONET','TMD','USP','GFZ','INGV','USGS','EMSC','HKO','BCSF','NRCAN','MMD','PHIVOLCS','GA','CENAIS','GSRAS','BGS','IPMA','SSN','AFAD','SED','NOA','SCSN','IAG','IGP','NEPAL'] },
+        { name: '海啸', list: ['TSUNAMI_NMEFC','TSUNAMI_NTWC','TSUNAMI_PTWC','TSUNAMI_INCOIS','TSUNAMI_CAT','TSUNAMI_CWA','JMA_OKIAI'] },
+        { name: '其它', list: ['台风','火山','气象','灾害','小行星','海啸','云图'] }
+    ];
+
+    function render(states){
+        states = states || {};
+        var box = document.getElementById('srcListBox');
+        if (!box) return;
+        var html = '<div style="display:flex;flex-wrap:wrap;gap:10px;">';
+        for (var g = 0; g < window._srcGroups.length; g++) {
+            var grp = window._srcGroups[g];
+            // 每个分组占一列
+            html += '<div style="flex:1;min-width:200px;">';
+            html += '<div style="color:#fff;font-weight:bold;margin:8px 0 4px;border-bottom:1px solid #444;padding-bottom:2px;">' + grp.name + '</div>';
+            for (var i = 0; i < grp.list.length; i++) {
+                var k = grp.list[i];
+                var v = states[k];
+                if (k === '云图') v = window._cloudStatus || '等待连接';
+                var txt, color;
+                if (v === '已连接' || v === true) { txt = '已连接'; color = '#00e676'; }
+                else if (v === '未连接' || v === false) { txt = '未连接'; color = '#ff5252'; }
+                else { txt = '等待连接'; color = '#ffcc00'; }
+                html += '<div style="display:flex;justify-content:space-between;padding:2px 0;font-size:12px;">' +
+                        '<span style="color:' + color + ';">' + k + '</span>' +
+                        '<span style="color:' + color + ';">' + txt + '</span></div>';
+            }
+            html += '</div>';
+        }
+        html += '</div>';
+        box.innerHTML = html;
+    }
+    window.renderSrcList = render;
+
+    function refresh(){
+        var base = (function(){
+            try { return localStorage.getItem('api_base') || 'http://127.0.0.1:18080'; }
+            catch(e) { return 'http://127.0.0.1:18080'; }
+        })();
+        fetch(base + '/source_list').then(function(r){ return r.json(); }).then(function(d){
+            render(d || {});
+        }).catch(function(){ render({}); });
+    }
+    window.refreshSrcList = refresh;
+
+    setInterval(function(){
+        var cfg = document.getElementById('cfg');
+        if (!cfg || cfg.className.indexOf('show') < 0) return;
+        if (window._cfgTab !== 2) return;
+        var box = document.getElementById('srcListBox');
+        if (!box) {
+            box = document.createElement('div');
+            box.id = 'srcListBox';
+            box.style = 'padding:6px 8px;font-size:13px;color:#aaa;max-height:70vh;overflow-y:auto;';
+            cfg.appendChild(box);
+            render({});
+            refresh();
+        } else if (!box.innerHTML.trim()) {
+            render({});
+            refresh();
+        }
+    }, 1000);
+    setInterval(refresh, 5000);
+
+    console.log('OK 数据源面板已就绪');
+})();
+</script>
+
+
+<script>
+// ===== 测站面板包裹（绕过原switchTab） =====
+(function(){
+    function renderStations(){
+        var side = document.getElementById('side');
+        if (!side) return;
+        side.innerHTML = '<div style="padding:20px;color:#888;text-align:center;">加载中...</div>';
+        fetch('http://127.0.0.1:18080/stations').then(function(r){ return r.json(); }).then(function(res){
+            var arr = res;
+            if (arr && !Array.isArray(arr) && Array.isArray(arr.data)) arr = arr.data;
+            if (!Array.isArray(arr) || !arr.length) {
+                side.innerHTML = '<div style="padding:20px;color:#888;text-align:center;">暂无数据</div>';
+                return;
+            }
+            var html = '<div style="padding:8px 12px;font-size:11px;color:#888;border-bottom:1px solid #333;">共 '+arr.length+' 条 测站</div>';
+            for (var i=0; i<arr.length && i<300; i++){
+                var s = arr[i];
+                var inten = parseFloat(s.intensity);
+                var la = parseFloat(s.lat);
+                var lo = parseFloat(s.lng);
+                var place = '';
+                if (!isNaN(la) && !isNaN(lo)) {
+                    if (la>30 && la<46 && lo>128 && lo<146) place='日本';
+                    else if (la>33 && la<39 && lo>124 && lo<132) place='韩国';
+                    else if (la>21 && la<26 && lo>119 && lo<123) place='台湾';
+                    else if (la>17 && la<30 && lo>118 && lo<135) place='菲律宾/南海';
+                }
+                var subs = [s.source||'', (place?place+' · ':'')+'震度 '+(isNaN(inten)?'--':inten), '位置 '+(isNaN(la)?'?':la.toFixed(2))+', '+(isNaN(lo)?'?':lo.toFixed(2))];
+                subs = subs.filter(function(x){ return x; });
+                html += '<div class="item" style="cursor:pointer;" data-la="'+la+'" data-lo="'+lo+'">' +
+                    '<div style="display:flex;gap:6px;align-items:center;flex-wrap:nowrap;">' +
+                        '<span class="badge" style="background:#00e676;flex-shrink:0;white-space:nowrap;">📡 测站</span>' +
+                        '<span style="font-weight:bold;color:#fff;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">'+(s.name||s.id||'测站')+'</span>' +
+                    '</div>' +
+                    '<div class="meta" style="margin-top:2px;">'+subs.join(' · ')+'</div>' +
+                '</div>';
+            }
+            side.innerHTML = html;
+            var its = side.querySelectorAll('.item[data-la]');
+            for (var k=0; k<its.length; k++){
+                (function(el){
+                    el.onclick = function(){
+                        var a = parseFloat(el.getAttribute('data-la'));
+                        var o = parseFloat(el.getAttribute('data-lo'));
+                        if (!isNaN(a) && !isNaN(o) && window.map) window.map.flyTo([a, o], 8, {duration: 0.8});
+                    };
+                })(its[k]);
+            }
+        }).catch(function(e){
+            side.innerHTML = '<div style="padding:20px;color:#ff5252;text-align:center;">加载失败: '+e.message+'</div>';
+        });
+    }
+
+    function wrap(){
+        if (!window.switchTab) return false;
+        if (window.switchTab._stationWrapped) return true;
+        var orig = window.switchTab;
+        window.switchTab = function(t){
+            if (String(t) === '9') {
+                var ids = ['tabAll','tabEew','tabHist','tabTyphoon','tabVolcano','tabWeather','tabCheji','tabNea','tabTsunami2','tabStation'];
+                for (var i=0;i<ids.length;i++){ var b=document.getElementById(ids[i]); if(b) b.className=''; }
+                var tb = document.getElementById('tabStation'); if(tb) tb.className='on';
+                window.tab = 9;
+                renderStations();
+                return;
+            }
+            return orig.apply(this, arguments);
+        };
+        window.switchTab._stationWrapped = true;
+        return true;
+    }
+    wrap();
+    var n = 0;
+    var timer = setInterval(function(){
+        if (wrap() || ++n > 100) clearInterval(timer);
+    }, 200);
+    console.log('OK 测站面板已包裹');
+})();
+</script>
+
+
+
+
+
+
+
+
+
+
+
+<script>
+// ===== 今天最大地震实时更新 =====
+(function(){
+    function parseT(x){
+        if (!x) return NaN;
+        return new Date(String(x).replace(/-/g,'/').replace('T',' ')).getTime();
+    }
+    function pickLoc(e){
+        var c = [e.HypoCenter, e.Hypocenter, e.LOCATION_C, e.placeName, e.place];
+        for (var i=0;i<c.length;i++){ if(c[i] && String(c[i]).trim()!=="") return String(c[i]); }
+        return '未知';
+    }
+    function getSrc(e){
+        var m = String(e.HypoCenter || '').match(/^\[([^\]]+)\]/);
+        return m ? m[1] : String(e.type || '').toUpperCase();
+    }
+
+    function update(){
+        var box = document.getElementById('today-max-info');
+        if (!box) return;
+
+        // 从接口拉最新数据（比 allEew/allHist 更及时）
+        Promise.all([
+            fetch('http://127.0.0.1:18080/all_eew').then(function(r){return r.json();}).catch(function(){return [];}),
+            fetch('http://127.0.0.1:18080/history').then(function(r){return r.json();}).catch(function(){return {};})
+        ]).then(function(res){
+            var eew = res[0] || [];
+            if (!Array.isArray(eew)) eew = [];
+            var h = res[1] || {};
+            var hist = Array.isArray(h) ? h : (h.shuju || h.data || h.list || []);
+            var all = eew.concat(hist);
+
+            var ts0 = new Date(); ts0.setHours(0,0,0,0);
+            var ts = ts0.getTime();
+
+            var maxE = null, maxMag = 0;
+            var seen = {};
+            for (var i = 0; i < all.length; i++) {
+                var e = all[i];
+                var et = parseT(e.OriginTime || e.O_TIME || e.shockTime);
+                if (isNaN(et) || et < ts) continue;
+                var mag = parseFloat(e.Magnitude || e.M || 0);
+                if (mag <= 0) continue;
+                var la = parseFloat(e.Latitude || e.EPI_LAT || 0).toFixed(1);
+                var lo = parseFloat(e.Longitude || e.EPI_LON || 0).toFixed(1);
+                var key = la + '_' + lo + '_' + String(et).slice(0, -5);
+                if (seen[key]) continue;
+                seen[key] = 1;
+                if (mag > maxMag) { maxMag = mag; maxE = e; }
+            }
+
+            if (!maxE) { box.innerHTML = '今天暂无'; return; }
+            var loc = pickLoc(maxE);
+            var src = getSrc(maxE);
+            box.innerHTML = 'M' + maxMag.toFixed(1) + ' ' + loc + ' <span style="color:#888;font-size:11px;">[' + src + ']</span>';
+        }).catch(function(){});
+    }
+
+    setInterval(update, 3000);
+    setTimeout(update, 500);
+    console.log('OK 今天最大地震实时更新已启动');
+})();
+</script>
+
+
+
+
+
+<script>
+// ===== 全数据源直连（无需 Python 代理） =====
+(function(){
+    var TOKEN = (function(){ try { return localStorage.getItem('wq_token') || ''; } catch(e){ return ''; } })();
+    var B = 'wss://api.2v8.cn/ws/';
+    var A = 'wss://api.aloys23.link/ws/quake/';
+
+    window.allEew = window.allEew || [];
+    window.allHist = window.allHist || [];
+    window._stationList = window._stationList || [];
+    window.events = window.events || {};
+    window._volcanoList = window._volcanoList || [];
+    window._weatherList = window._weatherList || [];
+    window._chejiList = window._chejiList || [];
+    window._neaList = window._neaList || [];
+    window._tsunamiList = window._tsunamiList || [];
+
+    function putEew(e){
+        var id = String(e.EventID || '');
+        if (!id) return;
+        window.allEew = window.allEew.filter(function(x){ return String(x.EventID) !== id; });
+        window.allEew.unshift(e);
+        if (window.allEew.length > 2000) window.allEew.length = 2000;
+        window.events[id] = e;
+    }
+
+    // ---- 地震预警 + 历史（聚合） ----
+    function parseAll(msg){
+        try {
+            var items = JSON.parse(msg);
+            if (!Array.isArray(items)) items = [items];
+            for (var i=0;i<items.length;i++){
+                var it = items[i];
+                var src = it.source || '';
+                var d = it.Data;
+                if (!d || typeof d !== 'object') continue;
+                var eid = d.id;
+                if (!eid) continue;
+                var m = parseFloat(d.magnitude) || 0;
+                var isEew = /_eew$/.test(src) || ['cea','cea-pr','cea_all','early_est'].indexOf(src) >= 0;
+                var e = {
+                    EventID: src.toUpperCase()+'_'+eid,
+                    ReportNum: d.updates || 1,
+                    Latitude: d.latitude, Longitude: d.longitude,
+                    Depth: d.depth, Magnitude: m,
+                    HypoCenter: '['+src.toUpperCase()+']'+(d.placeName||''),
+                    OriginTime: d.shockTime || '',
+                    MaxIntensity: d.maxIntensity || d.epiIntensity || '',
+                    isFinal: !!d.final, type: src,
+                    _kind: isEew ? 'eew' : 'hist'
+                };
+                if (isEew) putEew(e);
+                else {
+                    var he = {id:String(eid), O_TIME:e.OriginTime, EPI_LAT:e.Latitude, EPI_LON:e.Longitude, EPI_DEPTH:e.Depth, M:m, LOCATION_C:e.HypoCenter, _kind:'hist'};
+                    window.allHist = window.allHist.filter(function(x){ return x.id !== he.id; });
+                    window.allHist.unshift(he);
+                    if (window.allHist.length > 500) window.allHist.length = 500;
+                }
+            }
+            if (window.renderCurrent) window.renderCurrent();
+        } catch(ex){}
+    }
+    function wsAll(){
+        try {
+            var w = new WebSocket(B+'all?token='+TOKEN);
+            w.onopen = function(){ console.log('✅ 地震聚合已连接'); if(window.markConnected){ window.markConnected('ALL', true); window.markConnected('WHEWS', true); window.markConnected('GQ', true); window.markConnected('USGS', true); window.markConnected('CENC', true); window.markConnected('JMA情报', true); window.markConnected('CWA情报', true); window.markConnected('JMA海啸', true); window.markConnected('CWA_EWW', true); window.markConnected('SA_EWW', true); window.markConnected('KMA_EWW', true); window.markConnected('EARLY_EST', true); window.markConnected('CEA', true); window.markConnected('CEA_PR', true); window.markConnected('CEA_ALL', true); window.markConnected('CENC_INT', true); window.markConnected('BEIJING', true); window.markConnected('YUNNAN', true); window.markConnected('NINGXIA', true); window.markConnected('DZJ', true); window.markConnected('KMA', true); window.markConnected('BMKG', true); window.markConnected('GEONET', true); window.markConnected('TMD', true); window.markConnected('USP', true); window.markConnected('GFZ', true); window.markConnected('INGV', true); window.markConnected('EMSC', true); window.markConnected('HKO', true); window.markConnected('BCSF', true); window.markConnected('NRCAN', true); window.markConnected('MMD', true); window.markConnected('PHIVOLCS', true); window.markConnected('GA', true); window.markConnected('CENAIS', true); window.markConnected('GSRAS', true); window.markConnected('BGS', true); window.markConnected('IPMA', true); window.markConnected('SSN', true); window.markConnected('AFAD', true); window.markConnected('SED', true); window.markConnected('NOA', true); window.markConnected('SCSN', true); window.markConnected('IAG', true); window.markConnected('IGP', true); window.markConnected('NEPAL', true); window.markConnected('CMT_USGS', true); window.markConnected('CMT_EMSC', true); window.markConnected('CMT_GFZ', true); window.markConnected('CMT_INGV', true); window.markConnected('CMT_CENC', true); window.markConnected('TSUNAMI_NMEFC', true); window.markConnected('TSUNAMI_NTWC', true); window.markConnected('TSUNAMI_PTWC', true); window.markConnected('TSUNAMI_INCOIS', true); window.markConnected('TSUNAMI_CAT', true); window.markConnected('TSUNAMI_CWA', true); window.markConnected('JMA_OKIAI', true); window.markConnected('海啸', true); window.markConnected('台风', true); window.markConnected('火山', true); window.markConnected('气象', true); window.markConnected('自然灾害', true); window.markConnected('小行星', true); window.markConnected('云图', true); } };
+            w.onmessage = function(ev){ parseAll(ev.data); };
+            w.onclose = function(){ setTimeout(wsAll, 5000); };
+        } catch(e){}
+    }
+
+    // ---- 测站 ----
+    function wsStation(name){
+        try {
+            var w = new WebSocket(B+name+'?token='+TOKEN);
+            var sm = [];
+            w.onopen = function(){ console.log('✅ 测站 '+name+' 已连接'); if(window.markConnected) window.markConnected(name+'测站', true); };
+            w.onmessage = function(ev){
+                try {
+                    var o = JSON.parse(ev.data);
+                    if (o.stations && Array.isArray(o.stations)){ sm = o.stations; return; }
+                    var d = o.Data; if (!d) return;
+                    var arr = d.shindo || d.mmi || d.pga;
+                    if (!arr || !Array.isArray(arr)) return;
+                    var list = [];
+                    for (var i=0;i<arr.length;i++){
+                        if (i >= sm.length) break;
+                        var v = parseFloat(arr[i]); if (isNaN(v)) continue;
+                        if (d.pga){ if(v<0.5)v=0; else if(v<1.4)v=2; else if(v<4.5)v=3; else if(v<10)v=4; else if(v<25)v=5; else if(v<44)v=6; else if(v<80)v=7; else v=8; }
+                        list.push({id:sm[i].id||(name+'_'+i), name:name+'-'+(i+1), lat:parseFloat(sm[i].latitude), lng:parseFloat(sm[i].longitude), intensity:v, source:name});
+                    }
+                    window._stationList = window._stationList.filter(function(x){ return x.source !== name; }).concat(list);
+                } catch(ex){}
+            };
+            w.onclose = function(){ setTimeout(function(){ wsStation(name); }, 30000); };
+        } catch(e){}
+    }
+
+    // ---- 通用灾害（火山/气象/灾害/小行星/海啸） ----
+    function wsSimple(name, globalVar){
+        try {
+            var w = new WebSocket(B+name+'?token='+TOKEN);
+            w.onopen = function(){ console.log('✅ '+name+' 已连接'); if(window.markConnected){ var m={va:'火山',weatheralarm:'气象',cheji:'灾害',nea:'小行星',tsunami:'海啸'}; window.markConnected(m[name]||name, true); } };
+            w.onmessage = function(ev){
+                try {
+                    var arr = JSON.parse(ev.data);
+                    if (!Array.isArray(arr)) arr = [arr];
+                    for (var i=0;i<arr.length;i++){
+                        var d = arr[i].Data; if (!d) continue;
+                        var eid = d.id || d.code || d.eventId; if (!eid) continue;
+                        var e = Object.assign({}, d);
+                        e.type = name;
+                        window[globalVar] = window[globalVar].filter(function(x){ return String(x.id||x.code) !== String(eid); });
+                        window[globalVar].unshift(e);
+                        if (window[globalVar].length > 200) window[globalVar].length = 200;
+                    }
+                } catch(ex){}
+            };
+            w.onclose = function(){ setTimeout(function(){ wsSimple(name, globalVar); }, 60000); };
+        } catch(e){}
+    }
+
+    // ---- GQ / USGS ----
+    function wsOverseas(tag){
+        // 需管理员解锁才能连
+        var unlocked = false;
+        try { unlocked = localStorage.getItem('overseas_unlocked') === '1'; } catch(e){}
+        if (!unlocked) {
+            console.log('⚠️ ' + tag + ' 未解锁，跳过连接');
+            if (window.markConnected) window.markConnected(tag.toUpperCase(), false);
+            return;
+        }
+        try {
+            var w = new WebSocket(A+tag);
+            w.onopen = function(){ console.log('✅ '+tag+' 已连接'); if(window.markConnected) window.markConnected(tag.toUpperCase(), true); };
+            w.onmessage = function(ev){
+                try {
+                    var o = JSON.parse(ev.data);
+                    var d = o.Data || o.payload || {};
+                    var eid = d.id || d.eventId; if (!eid) return;
+                    var m = parseFloat(d.magnitude) || 0;
+                    putEew({
+                        EventID: tag.toUpperCase()+'_'+eid,
+                        ReportNum: d.revision || d.updates || 1,
+                        Latitude: d.latitude, Longitude: d.longitude,
+                        Depth: d.depth, Magnitude: m,
+                        HypoCenter: '['+tag.toUpperCase()+']'+(d.placeName || d.region || ''),
+                        OriginTime: d.shockTime || d.originTime || '',
+                        MaxIntensity: '', isFinal: false,
+                        type: tag, _kind: 'eew'
+                    });
+                    if (window.renderCurrent) window.renderCurrent();
+                } catch(ex){}
+            };
+            w.onclose = function(){ setTimeout(function(){ wsOverseas(tag); }, 30000); };
+        } catch(e){}
+    }
+
+    // 先给所有源标记为"未连接"（连上后自动变已连接）
+    window._localConn = window._localConn || {};
+    var ALL_SOURCES = ['ALL','WHEWS','GQ','USGS','CENC','JMA情报','CWA情报','JMA海啸','CWA_EWW','SA_EWW','KMA_EWW','EARLY_EST','CEA','CEA_PR','CEA_ALL','CENC_INT','BEIJING','YUNNAN','NINGXIA','DZJ','KMA','BMKG','GEONET','TMD','USP','GFZ','INGV','EMSC','HKO','BCSF','NRCAN','MMD','PHIVOLCS','GA','CENAIS','GSRAS','BGS','IPMA','SSN','AFAD','SED','NOA','SCSN','IAG','IGP','NEPAL','CMT_USGS','CMT_EMSC','CMT_GFZ','CMT_INGV','CMT_CENC','TSUNAMI_NMEFC','TSUNAMI_NTWC','TSUNAMI_PTWC','TSUNAMI_INCOIS','TSUNAMI_CAT','TSUNAMI_CWA','JMA_OKIAI','nied测站','snet测站','kma_station测站','palert测站','trem测站','火山','气象','灾害','小行星','海啸','台风','云图'];
+    ALL_SOURCES.forEach(function(k){ if (!window._localConn[k]) window._localConn[k] = '未连接'; });
+
+    if (!TOKEN) {
+        console.log('⚠️ 没有 Token，数据源已禁用。');
+        return;
+    }
+    setTimeout(function(){
+        wsAll();
+        wsStation('nied'); wsStation('snet'); wsStation('kma_station');
+        wsStation('palert'); wsStation('trem');
+        wsSimple('va', '_volcanoList');
+        wsSimple('weatheralarm', '_weatherList');
+        wsSimple('cheji', '_chejiList');
+        wsSimple('nea', '_neaList');
+        wsSimple('tsunami', '_tsunamiList');
+        wsOverseas('gq'); wsOverseas('usgs');
+        console.log('🚀 全数据源直连已启动');
+    }, 800);
+
+    
+})();
+</script>
+
+
+
+
+
+<script>
+// ===== 直连版渲染（读内存，不走HTTP） =====
+(function(){
+    function parseT(x){
+        if (!x) return NaN;
+        return new Date(String(x).replace(/-/g,'/').replace('T',' ')).getTime();
+    }
+    function pickLoc(e){
+        var c = [e.HypoCenter, e.Hypocenter, e.LOCATION_C, e.placeName, e.place];
+        for (var i=0;i<c.length;i++){ if(c[i] && String(c[i]).trim()!=="") return String(c[i]); }
+        return '未知';
+    }
+    function srcName(e){
+        var m = String(e.HypoCenter||'').match(/^\[([^\]]+)\]/);
+        return m ? m[1] : String(e.type||'其他').toUpperCase();
+    }
+
+    // 用内存数据渲染
+    window.render = function(arr){
+        var side = document.getElementById('side');
+        if (!side) return;
+
+        if (!window._quakeMarkerLayer && window.map) {
+            window._quakeMarkerLayer = L.layerGroup().addTo(window.map);
+        }
+        if (window._quakeMarkerLayer) window._quakeMarkerLayer.clearLayers();
+
+        if (!arr || !arr.length){
+            side.innerHTML = '<div style="padding:20px;color:#888;text-align:center;">暂无数据<br><span style="font-size:12px;color:#aaa;">等待数据源推送...</span></div>';
+            return;
+        }
+
+        // 按时间降序
+        arr.sort(function(a,b){
+            return (parseT(b.OriginTime||b.O_TIME||b.shockTime)||0) - (parseT(a.OriginTime||a.O_TIME||a.shockTime)||0);
+        });
+
+        var html = '';
+        for (var i = 0; i < arr.length && i < 300; i++){
+            var e = arr[i];
+            var la = parseFloat(e.Latitude || e.EPI_LAT);
+            var lo = parseFloat(e.Longitude || e.EPI_LON);
+            if (isNaN(la) || isNaN(lo) || (la===0 && lo===0)) continue;
+
+            var id = String(e.EventID || e.id || ('e_'+i));
+            window.events[id] = e;
+
+            // 是否活跃地震波（10分钟内）
+            var _t0 = new Date(String(e.OriginTime || e.O_TIME || e.shockTime || '').replace(/-/g,'/').replace('T',' ')).getTime();
+            var _el = (Date.now() - _t0) / 1000;
+            var isEew = !isNaN(_t0) && _el >= 0 && _el <= 600;
+            if (window._quakeMarkerLayer){
+                if (isEew) {
+                    L.marker([la,lo],{icon:L.divIcon({className:'', html:'<div style="color:#ff2d2d;font-size:20px;font-weight:bold;line-height:20px;text-shadow:0 0 3px #000">✕</div>', iconSize:[20,20], iconAnchor:[10,10]})}).addTo(window._quakeMarkerLayer);
+                } else {
+                    L.circleMarker([la,lo],{radius:4, color:'#ffb703', fillColor:'#ffb703', fillOpacity:0.85, weight:1}).addTo(window._quakeMarkerLayer);
+                }
+            }
+
+            var mag = parseFloat(e.Magnitude || e.M || 0);
+            var cat = isEew ? '预警' : '历史';
+            var catBg = isEew ? '#e63946' : '#457b9d';
+            var rn = e.ReportNum || e.updates || 1;
+            var isFinal = e.isFinal || e.final || false;
+            var tag = '';
+            if (isEew){
+                var isJMA = String(e.type||'').toUpperCase().indexOf('JMA')>=0 || String(e.HypoCenter||'').toUpperCase().indexOf('JMA')>=0;
+                if (isFinal) tag = isJMA ? '<span class="badge" style="background:#f4a261;color:#000;">最终第'+rn+'报</span>' : '<span class="badge" style="background:#f4a261;color:#000;">最终报</span>';
+                else tag = '<span class="badge" style="background:#2a9d8f;color:#fff;">第'+rn+'报</span>';
+            }
+            var rawT = e.OriginTime || e.O_TIME || e.shockTime || '';
+            var tStr = rawT ? String(rawT).slice(0,16).replace('T',' ') : '--';
+            var dep = e.Depth !== undefined ? e.Depth : (e.EPI_DEPTH !== undefined ? e.EPI_DEPTH : '?');
+
+            html += '<div class="item" data-id="'+id+'" style="white-space:nowrap;cursor:pointer;">' +
+                '<div style="display:flex;gap:5px;align-items:center;flex-wrap:nowrap;">' +
+                    '<span class="badge" style="background:'+catBg+';flex-shrink:0;">'+cat+'</span>' +
+                    (mag>0 ? '<span class="badge b-mag" style="flex-shrink:0;">M'+mag.toFixed(1)+'</span>' : '') +
+                    '<span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;min-width:0;color:#fff;">'+pickLoc(e)+'</span>' +
+                    tag +
+                '</div>' +
+                '<div class="meta" style="margin-top:2px;">'+tStr+' · 深'+dep+'km</div>' +
+            '</div>';
+        }
+        side.innerHTML = html;
+
+        // 点击跳转
+        var its = side.querySelectorAll('.item[data-id]');
+        for (var k=0; k<its.length; k++){
+            (function(el){
+                el.onclick = function(){
+                    var eid = el.getAttribute('data-id');
+                    var evt = window.events[eid];
+                    if (evt && window.map){
+                        var a = parseFloat(evt.Latitude || evt.EPI_LAT);
+                        var o = parseFloat(evt.Longitude || evt.EPI_LON);
+                        if (!isNaN(a) && !isNaN(o)) { window.current = eid; window.map.flyTo([a,o], 8, {duration:0.8}); }
+                    }
+                };
+            })(its[k]);
+        }
+    };
+
+    // 覆盖 renderCurrent：根据 tab 从内存取数据
+    window.renderCurrent = function(){
+        var tabIdx = window.tab !== undefined ? window.tab : 2;
+        var list = [];
+        if (tabIdx === 0) {
+            list = (window.allEew || []).filter(function(e){ return e._kind === 'eew' || String(e.type).indexOf('EEW') >= 0; });
+        } else if (tabIdx === 1) {
+            list = window.allHist || [];
+        } else if (tabIdx === 9) {
+            list = window._stationList || [];
+        } else if (tabIdx === 8) {
+            list = window._tsunamiList || [];
+        } else if (tabIdx === 4) {
+            list = window._volcanoList || [];
+        } else if (tabIdx === 5) {
+            list = window._weatherList || [];
+        } else if (tabIdx === 6) {
+            list = window._chejiList || [];
+        } else if (tabIdx === 7) {
+            list = window._neaList || [];
+        } else {
+            list = (window.allEew || []).concat(window.allHist || []);
+        }
+        window.render(list);
+    };
+
+    // 每秒刷新
+    
+    console.log('OK 直连版渲染已就绪');
+})();
+</script>
+
+
+<script>
+// ===== 直连版数据源状态 =====
+(function(){
+    window._localConn = window._localConn || {};
+
+    // 覆盖 renderSrcList 和 refreshSrcList，从本地状态读
+    
+
+    // 每 2 秒刷新一次面板
+    
+
+    // 供各连接调用
+    window.markConnected = function(name, ok){
+        window._localConn[name] = ok ? '已连接' : '未连接';
+    };
+
+    console.log('OK 直连版数据源状态已就绪');
+})();
+</script>
+
+
+<script>
+// ===== 清理降水/降雪图例列 =====
+(function(){
+    function clean(){
+        ['legend-rain-new','legend-rain-col','legend-rain-old'].forEach(function(id){
+            var el = document.getElementById(id);
+            if (el && el.parentNode) el.parentNode.removeChild(el);
+        });
+    }
+    clean();
+    setInterval(clean, 1000);
+})();
+</script>
+
+
+<script>
+// ===== 独立标记绘制（与地震波分离） =====
+(function(){
+    var _layer = null;
+    function draw(){
+        if (!window.map) { setTimeout(draw, 1000); return; }
+        // 独立图层，绝不被地震波脚本清掉
+        if (!_layer) _layer = L.layerGroup().addTo(window.map);
+        if (!window.map.hasLayer(_layer)) _layer.addTo(window.map);
+        _layer.clearLayers();
+
+        var list = (window.allEew || []).concat(window.allHist || []);
+        if (!list.length) return;
+
+        var seen = {};
+        for (var i=0; i<list.length; i++){
+            var e = list[i];
+            var la = parseFloat(e.Latitude || e.EPI_LAT);
+            var lo = parseFloat(e.Longitude || e.EPI_LON);
+            if (isNaN(la) || isNaN(lo) || (la===0 && lo===0)) continue;
+
+            var key = la.toFixed(2)+'_'+lo.toFixed(2);
+            if (seen[key]) continue;
+            seen[key] = 1;
+
+            var _src = String(e.type || '').toLowerCase() + ' ' + String(e.HypoCenter || '').toLowerCase();
+            var isEew = e._kind === 'eew' 
+                     || _src.indexOf('eew') >= 0
+                     || _src.indexOf('gq') >= 0
+                     || _src.indexOf('usgs') >= 0
+                     || _src.indexOf('jma') >= 0
+                     || _src.indexOf('cwa') >= 0
+                     || _src.indexOf('kma') >= 0
+                     || _src.indexOf('whems') >= 0
+                     || _src.indexOf('early_est') >= 0
+                     || _src.indexOf('cea') >= 0
+                     || e.ReportNum > 1
+                     || e._kind !== 'hist';
+            if (isEew) {
+                L.marker([la, lo], {icon: L.divIcon({
+                    className:'',
+                    html:'<div style="color:#ff2d2d;font-size:22px;font-weight:bold;line-height:22px;text-align:center;text-shadow:0 0 3px #000;">✕</div>',
+                    iconSize:[22,22], iconAnchor:[11,11]
+                })}).addTo(_layer);
+            } else {
+                L.circleMarker([la, lo], {radius:4, color:'#ffb703', fillColor:'#ffb703', fillOpacity:0.85, weight:1}).addTo(_layer);
+            }
+        }
+    }
+    setInterval(draw, 500);
+    setTimeout(draw, 1000);
+    console.log('OK 独立标记绘制已启动');
+})();
+</script>
+
+
+
+
+
+<script>
+// ===== 自定义声音文件（3种类型各一个） =====
+(function(){
+    var TYPES = [
+        {key: 'new_eew',    label: '新地震'},
+        {key: 'update_eew', label: '预警更新'},
+        {key: 'hist',       label: '历史刷新'}
+    ];
+    var store = {};
+
+    // 加载已保存的
+    TYPES.forEach(function(t){
+        try {
+            var v = localStorage.getItem('custom_sound_' + t.key);
+            if (v) store[t.key] = new Audio(v);
+        } catch(e){}
+    });
+
+    // 覆盖 playAlertSound
+    var _orig = window.playAlertSound;
+    window.playAlertSound = function(type){
+        if (store[type]) {
+            try { store[type].currentTime = 0; store[type].play(); return; } catch(e){}
+        }
+        if (_orig) _orig(type);
+    };
+
+    window.testSound = function(key){
+        if (store[key]) {
+            store[key].currentTime = 0;
+            store[key].play();
+        } else { if (window.showNotice) window.showNotice('⚠️ 还没设置这个类型的自定义声音', '#ffcc00'); }
+    };
+
+    window.clearSound = function(key){
+        localStorage.removeItem('custom_sound_' + key);
+        delete store[key];
+        var t = document.getElementById('sound-tip-' + key);
+        if (t) { t.innerText = '已清除'; t.style.color = '#ffcc00'; }
+    };
+
+    function injectUI(){
+        var tip = document.getElementById('sound-pwd-tip');
+        if (!tip || tip.innerText.indexOf('解锁成功') < 0) return;
+        if (document.getElementById('custom-sound-box')) return;
+
+        var box = document.createElement('div');
+        box.id = 'custom-sound-box';
+        box.style = 'margin-top:10px;padding-top:8px;border-top:1px solid #444;';
+        var h = '<div style="color:#fff;font-weight:bold;margin-bottom:8px;font-size:13px;">自定义声音文件（每类一个）</div>';
+
+        TYPES.forEach(function(t){
+            h += '<div style="margin-bottom:10px;padding:6px;background:#1a1a1a;border-radius:4px;">' +
+                    '<div style="color:#ddd;font-size:12px;margin-bottom:4px;">' + t.label + '</div>' +
+                    '<input type="file" id="sfile-' + t.key + '" accept="audio/*" style="color:#ccc;font-size:11px;width:100%;">' +
+                    '<div style="display:flex;gap:6px;margin-top:6px;">' +
+                        '<button onclick="testSound(\'' + t.key + '\')" style="flex:1;padding:4px;background:#2a9d8f;color:#fff;border:none;border-radius:3px;cursor:pointer;font-size:11px;">试听</button>' +
+                        '<button onclick="clearSound(\'' + t.key + '\')" style="flex:1;padding:4px;background:#e63946;color:#fff;border:none;border-radius:3px;cursor:pointer;font-size:11px;">清除</button>' +
+                    '</div>' +
+                    '<div id="sound-tip-' + t.key + '" style="font-size:10px;color:#888;margin-top:4px;"></div>' +
+                 '</div>';
+        });
+
+        box.innerHTML = h;
+        tip.parentNode.insertBefore(box, tip.nextSibling);
+
+        TYPES.forEach(function(t){
+            var el = document.getElementById('sfile-' + t.key);
+            if (!el) return;
+            el.onchange = function(){
+                var f = this.files[0];
+                if (!f) return;
+                var tEl = document.getElementById('sound-tip-' + t.key);
+                if (f.size > 4 * 1024 * 1024) {
+                    tEl.innerText = '❌ 太大（>4MB）'; tEl.style.color = '#ff5252';
+                    return;
+                }
+                var r = new FileReader();
+                r.onload = function(ev){
+                    try {
+                        localStorage.setItem('custom_sound_' + t.key, ev.target.result);
+                        store[t.key] = new Audio(ev.target.result);
+                        tEl.innerText = '✅ ' + f.name + ' (' + Math.round(f.size/1024) + 'KB)';
+                        tEl.style.color = '#00e676';
+                    } catch(e){
+                        tEl.innerText = '❌ 保存失败'; tEl.style.color = '#ff5252';
+                    }
+                };
+                r.readAsDataURL(f);
+            };
+        });
+    }
+
+    setInterval(injectUI, 500);
+    console.log('OK 三类自定义声音已就绪');
+})();
+</script>
+
+
+<script>
+// ===== Token 保存 =====
+window.saveToken = function(){
+    var el = document.getElementById('token-input');
+    var tip = document.getElementById('token-tip');
+    if (!el) return;
+    var v = el.value.trim();
+    if (!v) { if(tip){tip.innerText='请输入 token'; tip.style.color='#ff5252';} return; }
+    if (v.indexOf('wat_') !== 0 && v.length < 20) { if(tip){tip.innerText='token 格式不对（应以 wat_ 开头）'; tip.style.color='#ff5252';} return; }
+    try {
+        localStorage.setItem('wq_token', v);
+        if(tip){ tip.innerText = '✅ 已保存，正在刷新...'; tip.style.color = '#00e676'; }
+        
+    } catch(e) { if(tip){tip.innerText='保存失败: '+e.message; tip.style.color='#ff5252';} }
+};
+</script>
+
+
+
+
+
+<script>
+// ===== 前往 Token 设置的跳转 =====
+(function(){
+    window.gotoTokenSetting = function(){
+        // 打开设置面板
+        var cfg = document.getElementById('cfg');
+        if (!cfg) return;
+        // 打开并切到数据源标签
+        if (window._cfgTab !== undefined) window._cfgTab = 2;
+        if (typeof window.cfgTab === 'function') {
+            window.cfgTab(2);
+        } else if (typeof window.toggleCfg === 'function') {
+            window.toggleCfg();
+            setTimeout(function(){ if (typeof window.cfgTab==='function') window.cfgTab(2); }, 100);
+        }
+        cfg.className = 'show';
+        // 滚动到顶部
+        setTimeout(function(){
+            var box = document.getElementById('token-input-box');
+            if (box) box.scrollIntoView({behavior:'smooth', block:'start'});
+        }, 300);
+    };
+
+
+
+    console.log('OK Token 跳转按钮已就绪');
+})();
+</script>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<script>
+// ===== 顶部通知条 =====
+(function(){
+    window.showNotice = function(msg, color){
+        color = color || '#2a9d8f';
+        var old = document.getElementById('top-notice');
+        if (old) old.parentNode.removeChild(old);
+
+        var bar = document.createElement('div');
+        bar.id = 'top-notice';
+        bar.style = 'position:fixed;top:0;left:0;right:0;z-index:9999999;background:'+color+';color:#fff;padding:10px 16px;font-size:14px;display:flex;align-items:center;justify-content:space-between;box-shadow:0 2px 10px rgba(0,0,0,.6);';
+        bar.innerHTML = '<span style="flex:1;">' + msg + '</span><span id="top-notice-x" style="cursor:pointer;font-size:22px;font-weight:bold;padding:0 10px;user-select:none;line-height:1;">✕</span>';
+        document.body.appendChild(bar);
+
+        document.getElementById('top-notice-x').onclick = function(){ location.reload(); };
+    };
+    console.log('OK 顶部通知条已就绪');
+})();
+</script>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<script>setInterval(function(){ if(window.refreshSrcList) window.refreshSrcList(); }, 2000);</script>
+
+<script>
+// ===== 设置面板完整版 =====
+(function(){
+    window._cfgTab = window._cfgTab === undefined ? 0 : window._cfgTab;
+
+    window._srcGroups = [
+        { name: '地震预警', list: ['WHEWS','GQ','USGS','CENC','JMA情报','CWA情报','JMA海啸','CWA_EWW','SA_EWW','KMA_EWW','EARLY_EST'] },
+        { name: '测站数据', list: ['nied测站','snet测站','kma_station测站','palert测站','trem测站'] },
+        { name: '地震情报(国内)', list: ['CEA','CEA_PR','CEA_ALL','CENC','CENC_INT','BEIJING','YUNNAN','NINGXIA','DZJ'] },
+        { name: '地震情报(国际)', list: ['KMA','BMKG','GEONET','TMD','USP','GFZ','INGV','USGS','EMSC','HKO','BCSF','NRCAN','MMD','PHIVOLCS','GA','CENAIS','GSRAS','BGS','IPMA','SSN','AFAD','SED','NOA','SCSN','IAG','IGP','NEPAL'] },
+        { name: '海啸', list: ['TSUNAMI_NMEFC','TSUNAMI_NTWC','TSUNAMI_PTWC','TSUNAMI_INCOIS','TSUNAMI_CAT','TSUNAMI_CWA','JMA_OKIAI'] },
+        { name: '其它', list: ['台风','火山','气象','灾害','小行星','海啸'] }
+    ];
+
+    window.renderSrcList = function(states){
+        states = states || {};
+        var box = document.getElementById('srcListBox');
+        if (!box) return;
+        var html = '<div style="display:flex;flex-wrap:wrap;gap:10px;">';
+        for (var g = 0; g < window._srcGroups.length; g++){
+            var grp = window._srcGroups[g];
+            html += '<div style="flex:1;min-width:180px;">';
+            html += '<div style="color:#fff;font-weight:bold;margin:6px 0 4px;border-bottom:1px solid #444;padding-bottom:2px;">' + grp.name + '</div>';
+            for (var i = 0; i < grp.list.length; i++){
+                var k = grp.list[i];
+                var v = states[k];
+                if (k === '云图') v = window._cloudStatus || '等待连接';
+                var txt, color;
+                if (v === '已连接' || v === true) { txt = '已连接'; color = '#00e676'; }
+                else if (v === '未连接' || v === false) { txt = '未连接'; color = '#ff5252'; }
+                else { txt = '等待连接'; color = '#ffcc00'; }
+                html += '<div style="display:flex;justify-content:space-between;padding:2px 0;font-size:12px;">' +
+                        '<span style="color:'+color+';">'+k+'</span>' +
+                        '<span style="color:'+color+';">'+txt+'</span></div>';
+            }
+            html += '</div>';
+        }
+        html += '</div>';
+        box.innerHTML = html;
+    };
+
+    window.refreshSrcList = function(){
+        var states = window._localConn || {};
+        window.renderSrcList(states);
+    };
+    setInterval(window.refreshSrcList, 3000);
+
+    window.cfgTab = function(t){ window._cfgTab = t; if (window.buildCfg) window.buildCfg(); };
+
+    window.buildCfg = function(){
+        var c = document.getElementById('cfg');
+        if (!c) return;
+        var h = '<div style="display:flex;gap:6px;margin-bottom:12px">';
+        h += '<button onclick="cfgTab(0)" style="flex:1;background:'+(window._cfgTab===0?'#e67e22':'#333')+';color:#fff;padding:6px;border:none;border-radius:4px;cursor:pointer;">声音</button>';
+        h += '<button onclick="cfgTab(1)" style="flex:1;background:'+(window._cfgTab===1?'#7209b7':'#333')+';color:#fff;padding:6px;border:none;border-radius:4px;cursor:pointer;">模拟</button>';
+        h += '<button onclick="cfgTab(2)" style="flex:1;background:'+(window._cfgTab===2?'#00bcd4':'#333')+';color:#fff;padding:6px;border:none;border-radius:4px;cursor:pointer;">数据源</button>';
+        h += '<button onclick="cfgTab(3)" style="flex:1;background:'+(window._cfgTab===3?'#2a9d8f':'#333')+';color:#fff;padding:6px;border:none;border-radius:4px;cursor:pointer;">位置</button>';
+        h += '<button onclick="cfgTab(4)" style="flex:1;background:'+(window._cfgTab===4?'#e63946':'#333')+';color:#fff;padding:6px;border:none;border-radius:4px;cursor:pointer;">图层</button>';
+        h += '</div>';
+
+        if (window._cfgTab === 2) {
+            h += '<div class="t">数据源 Token</div>';
+            var curToken = '';
+            try { curToken = localStorage.getItem('wq_token') || ''; } catch(e){}
+            h += '<div style="display:flex;gap:6px;align-items:center;margin-bottom:6px;">';
+            h += '<input type="password" id="token-input" placeholder="wat_xxxxxxxx" value="'+curToken+'" style="flex:1;min-width:0;padding:6px 8px;background:#222;color:#eee;border:1px solid #555;border-radius:4px;font-size:11px;font-family:monospace;">';
+            h += '<button id="token-save" style="flex-shrink:0;padding:6px 12px;background:#2a9d8f;color:#fff;border:none;border-radius:3px;cursor:pointer;font-size:11px;">保存并重连</button>';
+            h += '<button id="token-clear" style="flex-shrink:0;padding:6px 12px;background:#555;color:#fff;border:none;border-radius:3px;cursor:pointer;font-size:11px;">清除</button>';
+            h += '<button id="token-goto" style="flex-shrink:0;padding:6px 12px;background:#555;color:#fff;border:none;border-radius:3px;cursor:pointer;font-size:11px;">前往申请</button>';
+            h += '</div>';
+            h += '<div id="token-tip" style="font-size:11px;color:#888;margin-bottom:10px;">'+(curToken?'当前已保存（长度 '+curToken.length+'）':'未设置 → 数据源已禁用')+'</div>';
+
+
+
+            h += '<div class="t">列表显示条数</div>';
+            var _curLimit = 100;
+            try { var _lv = parseInt(localStorage.getItem('list_limit')); if (_lv > 0) _curLimit = _lv; } catch(e){}
+            h += '<div style="display:flex;gap:6px;align-items:center;margin-bottom:8px;">';
+            h += '<input type="number" id="list-limit-input" value="'+_curLimit+'" min="10" max="5000" style="flex:1;padding:6px 8px;background:#222;color:#eee;border:1px solid #555;border-radius:4px;font-size:11px;">';
+            h += '<button id="list-limit-save" style="flex-shrink:0;padding:6px 12px;background:#2a9d8f;color:#fff;border:none;border-radius:3px;cursor:pointer;font-size:11px;">保存</button>';
+            h += '</div>';
+            h += '<div style="font-size:10px;color:#888;margin-bottom:10px;">范围 10 ~ 5000 条，保存后立即生效</div>';
+
+            h += '<div id="srcListBox" style="font-size:12px;max-height:60vh;overflow-y:auto;"></div>';
+        } else if (window._cfgTab === 3) {
+            h += '<div class="t">家庭位置</div>';
+            h += '<div class="row">纬度 <input id="home-lat" type="number" step="0.01" placeholder="31.02" style="width:100px"> 经度 <input id="home-lon" type="number" step="0.01" placeholder="113.76" style="width:100px"></div>';
+            h += '<div class="row"><button onclick="saveHomePos()">保存</button> <button onclick="clearHomePos()" style="background:#e63946">清除</button></div>';
+        } else if (window._cfgTab === 4) {
+            h += '<div class="t">图层开关</div>';
+            h += '<label style="display:flex;align-items:center;gap:8px;padding:6px 0;cursor:pointer;color:#ddd;"><input type="checkbox" id="cfg-ly-typhoon"> 台风路径</label>';
+            h += '<label style="display:flex;align-items:center;gap:8px;padding:6px 0;cursor:pointer;color:#ddd;"><input type="checkbox" id="cfg-ly-station"> 测站</label>';
+            h += '<label style="display:flex;align-items:center;gap:8px;padding:6px 0;cursor:pointer;color:#ddd;"><input type="checkbox" id="cfg-ly-legend" checked> 左下角图例</label>';
+        } else if (window._cfgTab === 1) {
+            h += '<div class="t">地震模拟</div>';
+            h += '<div id="sim-panel">';
+            h += '<div class="row">震级 <input id="simMag" type="number" value="5.0" step="0.1" min="0" max="10.0" style="width:70px"> 深度 <input id="simDep" type="number" value="10.0" step="0.1" min="0" max="700" style="width:70px"></div>';
+            h += '<div class="row">纬度 <input id="simLat" type="number" value="31.02" step="0.01" style="width:90px"> 经度 <input id="simLon" type="number" value="113.76" step="0.01" style="width:90px"></div>';
+            h += '<div class="row">地名 <input id="simLoc" type="text" value="模拟震中" style="width:180px"></div>';
+            h += '<div class="row"><button id="sim-btn" onclick="sendSim()" style="background:#e63946">发送地震</button></div>';
+            h += '<div id="sim-result-tip" style="font-size:12px;color:#00e676;"></div>';
+            h += '</div>';
+        } else {
+            h += '<div class="t">试听</div>';
+            h += '<div class="row"><button onclick="playAlertSound(\'new_eew\')">新地震</button> <button onclick="playAlertSound(\'update_eew\')">预警更新</button> <button onclick="playAlertSound(\'hist\')">历史刷新</button></div>';
+        }
+        c.innerHTML = h;
+
+        // 数据源面板：绑定事件 + 渲染
+        if (window._cfgTab === 2) {
+            setTimeout(function(){
+                var saveBtn = document.getElementById('token-save');
+                if (saveBtn) saveBtn.onclick = function(){
+                    var v = document.getElementById('token-input').value.trim();
+                    if (!v) { if(window.showNotice) window.showNotice('请输入 token','#ffcc00'); return; }
+                    try {
+                        localStorage.setItem('wq_token', v);
+                        localStorage.removeItem('overseas_unlocked');
+                        if (window.showNotice) window.showNotice('✅ Token 已保存，连接即将生效。点右侧 ✕ 立即重启', '#00e676');
+                    } catch(e) { if(window.showNotice) window.showNotice('保存失败','#e63946'); }
+                };
+                var llBtn = document.getElementById('list-limit-save');
+                if (llBtn) llBtn.onclick = function(){
+                    var v = parseInt(document.getElementById('list-limit-input').value);
+                    if (isNaN(v) || v < 10) v = 10;
+                    if (v > 5000) v = 5000;
+                    try { localStorage.setItem('list_limit', String(v)); } catch(e){}
+                    if (window.showNotice) window.showNotice('✅ 已保存，列表将显示 '+v+' 条', '#00e676');
+                    if (window.tab !== undefined && window.switchTab) window.switchTab(window.tab);
+                };
+
+                var gotoBtn = document.getElementById('token-goto');
+                if (gotoBtn) gotoBtn.onclick = function(){
+                    try {
+                        if (window.pywebview && window.pywebview.api && window.pywebview.api.open_url) {
+                            window.pywebview.api.open_url('https://auth.beecld.com/profile');
+                        } else {
+                            window.open('https://auth.beecld.com/profile', '_blank');
+                        }
+                    } catch(e) { location.href = 'https://auth.beecld.com/profile'; }
+                };
+
+                var clrBtn = document.getElementById('token-clear');
+                if (clrBtn) clrBtn.onclick = function(){
+                    localStorage.removeItem('wq_token');
+                    localStorage.removeItem('overseas_unlocked');
+                    if (window.showNotice) window.showNotice('🗑 Token 已清除，点右侧 ✕ 重启', '#e63946');
+                };
+                
+                window.refreshSrcList();
+            }, 50);
+        }
+    };
+
+    window.toggleCfg = function(){
+        var c = document.getElementById('cfg');
+        if (!c) return;
+        if (c.className.indexOf('show') >= 0) { c.className = ''; return; }
+        c.className = 'show';
+        window.buildCfg();
+    };
+
+    console.log('OK 设置面板完整版已就绪');
+})();
+</script>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<style>
+#side-toggle {
+  position: fixed;
+  top: 8px;
+  right: 388px;
+  z-index: 99999999;
+  background: #e63946;
+  color: #fff;
+  padding: 6px 12px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: bold;
+  border: 2px solid #fff;
+  box-shadow: 0 2px 8px rgba(0,0,0,.6);
+  user-select: none;
+}
+#side-toggle:hover { background: #c92d3a; }
+</style>
+<div id="side-toggle">收起列表 ◀</div>
+<script>
+(function(){
+  var b = document.getElementById('side-toggle');
+  b.dataset.c = '0';
+  b.onclick = function(){
+    var side = document.getElementById('side');
+    var tabs = document.getElementById('tabs');
+    if (b.dataset.c !== '1') {
+      if (side) side.style.display = 'none';
+      if (tabs) tabs.style.display = 'none';
+      b.innerText = '▶';
+      b.style.right = '8px';
+      b.dataset.c = '1';
+    } else {
+      if (side) { side.style.display = 'block'; side.style.width = '380px'; }
+      if (tabs) tabs.style.display = 'inline-flex';
+      b.innerText = '收起列表 ◀';
+      b.style.right = '388px';
+      b.dataset.c = '0';
+    }
+    setTimeout(function(){ if (window.map && window.map.invalidateSize) window.map.invalidateSize(); }, 350);
+  };
+})();
+</script>
+
+
+<script>
+// ===== 测站：数据+地图圆圈+左上角+图例（统一 0-7） =====
+(function(){
+    // 震度值映射：负值全部转 0
+    function normInt(v){
+        v = parseFloat(v);
+        if (isNaN(v) || v < 0) return 0;
+        if (v > 7) return 7;
+        return Math.round(v);
+    }
+    // 颜色：0=蓝, 1=青绿, 2=黄绿, 3=黄, 4=橙, 5=红, 6=深红, 7=紫
+    function colorOf(v){
+        // 日本气象厅标准配色
+        var c = ['#808080','#F2F2FF','#00AAFF','#0041FF','#FAF500','#FF9900','#FF2800','#9900FF'];
+        return c[normInt(v)] || '#808080';
+    }
+
+    // ---------- 1. 地图上画测站圆圈 ----------
+    function drawMap(){
+        if (!window.map) return;
+        if (!window._stationLayer) window._stationLayer = L.layerGroup().addTo(window.map);
+        if (!window.map.hasLayer(window._stationLayer)) window._stationLayer.addTo(window.map);
+        window._stationLayer.clearLayers();
+
+        var list = window._stationList || [];
+        if (!list.length) return;
+
+        var n = 0;
+        for (var i=0; i<list.length; i++){
+            var s = list[i];
+            var la = parseFloat(s.lat), lo = parseFloat(s.lng);
+            if (isNaN(la) || isNaN(lo)) continue;
+            var v = normInt(s.intensity);
+            var color = colorOf(v);
+
+            var iconHtml = '<div style="width:22px;height:22px;border-radius:50%;background:'+color+';border:2px solid #fff;display:flex;align-items:center;justify-content:center;color:#fff;font-weight:bold;font-size:11px;text-shadow:0 0 2px #000;box-shadow:0 0 5px rgba(0,0,0,.7);">'+v+'</div>';
+
+            L.marker([la, lo], {icon: L.divIcon({className:'', html:iconHtml, iconSize:[22,22], iconAnchor:[11,11]})})
+             .bindPopup('📡 ' + (s.name||'测站') + '<br>震度: ' + v + '<br>来源: ' + (s.source||'') + '<br>坐标: ' + la.toFixed(3) + ', ' + lo.toFixed(3))
+             .addTo(window._stationLayer);
+            n++;
+        }
+        console.log('[测站] 地图已画 ' + n + ' 个');
+    }
+
+    // ---------- 2. 左上角最大震度（0-7，保留两位小数不改整数）----------
+    function fmt(v){
+        if (v === null || v === undefined || isNaN(v)) return '<span style="color:#666;">--</span>';
+        var color = colorOf(v);
+        var v2 = parseFloat(v);
+        if (v2 < 0) v2 = 0;
+        return '<span style="color:'+color+';font-weight:bold;">' + v2.toFixed(2) + '</span>';
+    }
+    function updateTopLeft(){
+        var box = document.getElementById('station-intensity');
+        if (!box) return;
+        var list = window._stationList || [];
+        var m = {};
+        for (var i=0; i<list.length; i++){
+            var src = String(list[i].source || '').toLowerCase();
+            var v = parseFloat(list[i].intensity);
+            if (isNaN(v)) continue;
+            if (m[src] === undefined || v > m[src]) m[src] = v;
+        }
+        var tw   = (m['palert'] !== undefined) ? m['palert'] : null;
+        var kr   = (m['kma_station'] !== undefined) ? m['kma_station'] : (m['kma'] !== undefined ? m['kma'] : null);
+        var trem = (m['trem'] !== undefined) ? m['trem'] : null;
+        var nied = (m['nied'] !== undefined) ? m['nied'] : null;
+        var snet = (m['snet'] !== undefined) ? m['snet'] : null;
+        var jpLand = trem !== null ? trem : nied;
+
+        box.innerHTML =
+            '<div style="display:flex;justify-content:space-between;"><span>台湾测站</span>' + fmt(tw) + '</div>' +
+            '<div style="display:flex;justify-content:space-between;"><span>韩国测站</span>' + fmt(kr) + '</div>' +
+            '<div style="display:flex;justify-content:space-between;"><span>日本陆地测站</span>' + fmt(jpLand) + '</div>' +
+            '<div style="display:flex;justify-content:space-between;"><span>日本海底测站</span>' + fmt(snet) + '</div>';
+    }
+
+    // ---------- 3. 左下角图例：测站震度列（0-7）----------
+    function updateLegend(){
+        var legend = document.getElementById('intensity-legend');
+        if (!legend) return;
+        var col = document.getElementById('legend-station-col');
+        if (!col) {
+            col = document.createElement('div');
+            col.id = 'legend-station-col';
+            legend.appendChild(col);
+        }
+        var html = '<div style="font-weight:bold;margin-bottom:3px;font-size:9px;color:#aaa;text-align:center;">测站震度</div><div style="display:flex;flex-direction:row;gap:2px;">';
+        for (var i = 0; i <= 7; i++){
+            var color = colorOf(i);
+            var txtColor = (i === 1) ? '#000' : '#fff';
+            html += '<div style="width:18px;height:18px;border-radius:50%;background:'+color+';border:1px solid #555;display:flex;align-items:center;justify-content:center;color:'+txtColor+';font-weight:bold;font-size:10px;">'+i+'</div>';
+        }
+        html += '</div>';
+        col.innerHTML = html;
+    }
+
+    // ---------- 4. 定时刷新 ----------
+    function tick(){
+        drawMap();
+        updateTopLeft();
+        updateLegend();
+    }
+    setInterval(tick, 5000);
+    setTimeout(tick, 500);
+
+    console.log('OK 测站（0-7）已启动');
+})();
+</script>
+
+
+<script>
+// ===== 拦截本地 HTTP 请求（file:// 下 CORS 会失败） =====
+(function(){
+    var origFetch = window.fetch;
+    window.fetch = function(url, opts){
+        if (typeof url === 'string' && url.indexOf('127.0.0.1:18080') >= 0) {
+            var path = url.split('/').pop().split('?')[0];
+            var data = [];
+            if (path === 'all_eew') data = window.allEew || [];
+            else if (path === 'history') data = {shuju: window.allHist || []};
+            else if (path === 'stations') data = {data: window._stationList || []};
+            else if (path === 'volcano') data = window._volcanoList || [];
+            else if (path === 'weather') data = window._weatherList || [];
+            else if (path === 'cheji') data = window._chejiList || [];
+            else if (path === 'nea') data = window._neaList || [];
+            else if (path === 'tsunami') data = window._tsunamiList || [];
+            else if (path === 'source_list') data = window._localConn || {};
+            return Promise.resolve({
+                json: function(){ return Promise.resolve(data); },
+                text: function(){ return Promise.resolve(JSON.stringify(data)); },
+                ok: true
+            });
+        }
+        return origFetch.apply(this, arguments);
+    };
+    console.log('OK HTTP 请求已拦截为内存读取');
+})();
+</script>
+
+
+
+
+
+<script>
+// ===== 标签切换+渲染+点击 全部接管 =====
+(function(){
+    function parseT(x){
+        if (!x) return 0;
+        var t = new Date(String(x).replace(/-/g,'/').replace('T',' ')).getTime();
+        return isNaN(t) ? 0 : t;
+    }
+    function pickLoc(e){
+        var c = [e.HypoCenter, e.Hypocenter, e.LOCATION_C, e.placeName, e.place, e.volcanoName, e.title, e.name, e.subtitle];
+        for (var i=0;i<c.length;i++){ if(c[i] && String(c[i]).trim()!=="") return String(c[i]); }
+        return '未知';
+    }
+
+    // 每种标签的图标/名称/颜色
+    var CONF = {
+        0: {icon:'⚠️', name:'预警', color:'#e63946'},
+        1: {icon:'📜', name:'历史', color:'#457b9d'},
+        2: {icon:'',   name:'',     color:''},
+        3: {icon:'🌀', name:'台风', color:'#ff2d2d'},
+        4: {icon:'🌋', name:'火山', color:'#ff6b00'},
+        5: {icon:'☁️', name:'气象', color:'#ffcc00'},
+        6: {icon:'⚠️', name:'灾害', color:'#8b00ff'},
+        7: {icon:'☄️', name:'小行星', color:'#3333cc'},
+        8: {icon:'🌊', name:'海啸', color:'#1e6fd9'},
+        9: {icon:'📡', name:'测站', color:'#00e676'}
+    };
+
+    function getList(t){
+        if (t === 0) return (window.allEew || []).filter(function(e){ return e._kind === 'eew'; });
+        if (t === 1) return window.allHist || [];
+        if (t === 3) return window._typhoonList || [];
+        if (t === 4) return window._volcanoList || [];
+        if (t === 5) return window._weatherList || [];
+        if (t === 6) return window._chejiList || [];
+        if (t === 7) return window._neaList || [];
+        if (t === 8) return window._tsunamiList || [];
+        if (t === 9) return window._stationList || [];
+        return (window.allEew || []).concat(window.allHist || []);
+    }
+
+    function makeHtml(e, idx, tab){
+        var la = parseFloat(e.latitude || e.lat || e.Latitude || e.EPI_LAT);
+        var lo = parseFloat(e.longitude || e.lng || e.lon || e.Longitude || e.EPI_LON);
+        var id = String(e.id || e.EventID || ('x_'+tab+'_'+idx));
+        var c = CONF[tab] || {icon:'•',name:'数据',color:'#666'};
+
+        var title = pickLoc(e);
+        var subs = [];
+
+        // 全部标签：按每条数据自己的类型判断
+        var effTab = tab;
+        if (tab === 2) {
+            effTab = (e._kind === 'eew' || String(e.type||'').toUpperCase().indexOf('EEW') >= 0) ? 0 : 1;
+        }
+
+        if (tab === 9) {
+            // 测站
+            title = e.name || id;
+            var inten = parseFloat(e.intensity);
+            subs = [e.source||'', '震度 '+(isNaN(inten)?'--':inten), '位置 '+(isNaN(la)?'?':la.toFixed(2))+', '+(isNaN(lo)?'?':lo.toFixed(2))];
+        } else if (effTab === 0 || effTab === 1) {
+            var mag = parseFloat(e.Magnitude || e.M || 0);
+            var rn = e.ReportNum || e.updates || 1;
+            var isFinal = e.isFinal || e.final || false;
+            var rawTime = e.OriginTime || e.O_TIME || e.shockTime || e.time || '';
+            var timeStr = rawTime ? String(rawTime).slice(0, 19).replace('T', ' ') : '--';
+            var depVal = (e.Depth !== undefined && e.Depth !== null && e.Depth !== '') ? e.Depth : ((e.EPI_DEPTH !== undefined && e.EPI_DEPTH !== null && e.EPI_DEPTH !== '') ? e.EPI_DEPTH : '?');
+
+            if (effTab === 0) {
+                var isJMA = String(e.type||'').toUpperCase().indexOf('JMA')>=0 || String(e.HypoCenter||'').toUpperCase().indexOf('JMA')>=0;
+                var tag = isFinal ? (isJMA?'最终第'+rn+'报':'最终报') : ('第'+rn+'报');
+                subs = ['M'+mag.toFixed(1), '深'+depVal+'km', tag, timeStr];
+            } else {
+                subs = ['M'+mag.toFixed(1), '深'+depVal+'km', timeStr];
+            }
+        } else if (tab === 8) {
+            // 海啸
+            if (e.warningInfo) {
+                title = (e.warningInfo.level?'['+e.warningInfo.level+']':'') + (e.warningInfo.title||'海啸');
+                var si = e.shockInfo || {};
+                subs = [si.placeName||'', (si.magnitude?'M'+si.magnitude:''), (si.shockTime||'')];
+            } else {
+                subs = [e.subtitle||'', e.shockTime||''];
+            }
+        } else if (tab === 4) {
+            // 火山
+            title = e.volcanoName || e.name || '火山';
+            subs = [e.activity||'', e.infoTypeName||'', e.reportTime||''];
+        } else if (tab === 5) {
+            // 气象
+            title = e.title || e.name || '气象';
+            subs = [e.headline||'', e.effective||''];
+        } else if (tab === 6) {
+            // 灾害
+            title = e.placeName || e.name || '灾害';
+            subs = [e.eventTypeName||'', e.location||'', e.latestReportLevel||''];
+        } else if (tab === 7) {
+            // 小行星
+            title = e.name || '小行星';
+            subs = [e.flybyTime||'', e.missDistanceKm ? e.missDistanceKm+'km' : '', e.pha ? 'PHA' : ''];
+        } else if (tab === 3) {
+            // 台风
+            title = (e.name||'') + ' ' + (e.enname||'');
+            subs = [e.tc_num ? '第'+String(e.tc_num).slice(-2).replace(/^0/,'')+'号' : '', e.isactive==='1'?'活跃':'停编'];
+        }
+
+        subs = subs.filter(function(x){ return x; });
+
+        return '<div class="item" data-id="'+id+'" data-la="'+(isNaN(la)?'':la)+'" data-lo="'+(isNaN(lo)?'':lo)+'" style="white-space:nowrap;cursor:pointer;">' +
+            '<div style="display:flex;gap:5px;align-items:center;flex-wrap:nowrap;">' +
+                (function(){
+                    var cc = CONF[tab] || {};
+                    if (tab === 2) cc = CONF[effTab]; // 全部标签用实际类型
+                    if (!cc.icon) return '';
+                    return '<span class="badge" style="background:'+cc.color+';flex-shrink:0;white-space:nowrap;">'+cc.icon+' '+cc.name+'</span>';
+                })() +
+                '<span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;min-width:0;color:#fff;">'+title+'</span>' +
+            '</div>' +
+            (subs.length ? '<div class="meta" style="margin-top:2px;">'+subs.join(' · ')+'</div>' : '') +
+        '</div>';
+    }
+
+    function renderTab(t){
+        var side = document.getElementById('side');
+        if (!side) return;
+        // 台风标签由台风模块自己渲染，跳过
+        if (t === 3) return;
+        var list = getList(t);
+        if (t === 2) {
+            list.sort(function(a,b){
+                var aEew = (a._kind === 'eew') ? 0 : 1;
+                var bEew = (b._kind === 'eew') ? 0 : 1;
+                if (aEew !== bEew) return aEew - bEew;
+                return parseT(b.OriginTime||b.O_TIME||b.shockTime) - parseT(a.OriginTime||a.O_TIME||a.shockTime);
+            });
+        } else {
+            list.sort(function(a,b){ return parseT(b.OriginTime||b.O_TIME||b.shockTime||b.timeInfo&&b.timeInfo.alarmDate) - parseT(a.OriginTime||a.O_TIME||a.shockTime||a.timeInfo&&a.timeInfo.alarmDate); });
+        }
+        if (!list.length) {
+            side.innerHTML = '<div style="padding:20px;color:#888;text-align:center;">暂无数据</div>';
+            return;
+        }
+        var _maxN = 100;
+        try { var _v = parseInt(localStorage.getItem('list_limit')); if (_v > 0) _maxN = _v; } catch(e){}
+        var html = '<div style="padding:6px 12px;font-size:11px;color:#888;border-bottom:1px solid #333;">共 '+list.length+' 条，显示前 '+_maxN+' 条</div>';
+        for (var i = 0; i < list.length && i < _maxN; i++){
+            html += makeHtml(list[i], i, t);
+        }
+        side.innerHTML = html;
+    }
+
+    // 接管 switchTab
+    window.switchTab = function(t){
+        t = parseInt(t);
+        window.tab = t;
+        var ids = ['tabAll','tabEew','tabHist','tabTyphoon','tabVolcano','tabWeather','tabCheji','tabNea','tabTsunami2','tabStation'];
+        for (var i = 0; i < ids.length; i++){
+            var b = document.getElementById(ids[i]);
+            if (b) b.className = '';
+        }
+        var map2 = {0:'tabEew',1:'tabHist',2:'tabAll',3:'tabTyphoon',4:'tabVolcano',5:'tabWeather',6:'tabCheji',7:'tabNea',8:'tabTsunami2',9:'tabStation'};
+        if (map2[t]) { var b2 = document.getElementById(map2[t]); if (b2) b2.className = 'on'; }
+        renderTab(t);
+    };
+
+    // 全局点击委托（跳转）
+    document.addEventListener('click', function(ev){
+        var el = ev.target;
+        while (el && el !== document) {
+            if (el.classList && el.classList.contains('item')) {
+                var la = parseFloat(el.getAttribute('data-la'));
+                var lo = parseFloat(el.getAttribute('data-lo'));
+                if (!isNaN(la) && !isNaN(lo) && (la!==0||lo!==0) && window.map) {
+                    window.map.flyTo([la, lo], 8, {duration: 0.8});
+                }
+                return;
+            }
+            el = el.parentNode;
+        }
+    }, true);
+
+    // 每 3 秒刷新当前标签
+    setInterval(function(){
+        if (window.tab !== undefined) renderTab(window.tab);
+    }, 3000);
+
+    // 首次渲染
+    setTimeout(function(){ renderTab(window.tab === undefined ? 2 : window.tab); }, 500);
+
+    console.log('OK 标签切换+渲染+点击 已接管');
+})();
+</script>
+
+
+
+
+
+<script>
+// ===== 台风（JSONP，绕过 CORS） =====
+(function(){
+    window._typhoonList = window._typhoonList || [];
+    var _typhoonLayer = null;
+
+    // 强度配色（与左下角图例一致）
+    function strengthColor(str){
+        str = String(str||'');
+        if(str.indexOf('超强台风') >= 0) return '#8b00ff';
+        if(str.indexOf('强台风') >= 0) return '#ff0000';
+        if(str.indexOf('强热带风暴') >= 0) return '#ffcc00';
+        if(str.indexOf('热带风暴') >= 0) return '#00aaff';
+        if(str.indexOf('热带低压') >= 0) return '#00cc00';
+        if(str.indexOf('台风') >= 0) return '#ff8800';
+        return '#ff2d2d';
+    }
+
+    // 通过 JSONP 拉台风列表
+    var _tyCbIdx = 0;
+    function jsonp(url, cbName, timeout){
+        return new Promise(function(resolve, reject){
+            var sc = document.createElement('script');
+            sc.src = url + (url.indexOf('?')>=0?'&':'?') + 't=' + Date.now();
+            var timer = setTimeout(function(){
+                if (sc.parentNode) sc.parentNode.removeChild(sc);
+                reject(new Error('timeout'));
+            }, timeout || 10000);
+            window[cbName] = function(data){
+                clearTimeout(timer);
+                try { delete window[cbName]; } catch(e){}
+                if (sc.parentNode) sc.parentNode.removeChild(sc);
+                resolve(data);
+            };
+            sc.onerror = function(){
+                clearTimeout(timer);
+                if (sc.parentNode) sc.parentNode.removeChild(sc);
+                reject(new Error('load error'));
+            };
+            document.head.appendChild(sc);
+        });
+    }
+
+    // 拉台风列表
+    function loadTyphoonList(){
+        // 用固定的函数名，nmc 返回的 JSONP 包装名就是 typhoon_jsons_list_default
+        window.typhoon_jsons_list_default = function(data){
+            try {
+                var tl = (data && data.typhoonList) || [];
+                var out = [];
+                for (var i=0;i<tl.length;i++){
+                    var t = tl[i];
+                    if (!t || t.length < 8) continue;
+                    // 过滤未命名的热带低压（英文 nameless 或编号是8位）
+                    if (t[1] === 'nameless' || String(t[3]).length === 8) continue;
+                    out.push({
+                        id: String(t[0]),
+                        enname: t[1] || '',
+                        name: t[2] || '',
+                        tc_num: String(t[3]) || '',
+                        isactive: (String(t[7]) === 'start') ? '1' : '0',
+                        state: t[7] || ''
+                    });
+                }
+                out.sort(function(a,b){
+                    // 按台风编号降序：27号 → 26号 → ... → 1号
+                    var na = parseInt(String(a.tc_num).slice(-2)) || 0;
+                    var nb = parseInt(String(b.tc_num).slice(-2)) || 0;
+                    return nb - na;
+                });
+                window._typhoonList = out;
+                console.log('✅ 台风列表: ' + out.length + ' 个');
+                if (window.tab === 3) refreshTyphoonView();
+            } catch(e){ console.log('台风列表解析失败', e); }
+            return data;
+        };
+        var sc = document.createElement('script');
+        sc.src = 'http://typhoon.nmc.cn/weatherservice/typhoon/jsons/list_default?t=' + Date.now();
+        sc.onerror = function(){ console.log('❌ 台风列表请求失败'); };
+        document.head.appendChild(sc);
+        setTimeout(function(){ if (sc.parentNode) sc.parentNode.removeChild(sc); }, 8000);
+    }
+
+    // 加载单个台风详情（路径 + 预报）
+    function loadTyphoonDetail(id){
+        return new Promise(function(resolve){
+            window['typhoon_jsons_view_' + id] = function(data){
+                try { delete window['typhoon_jsons_view_' + id]; } catch(e){}
+                resolve(data);
+                return data;
+            };
+            var sc = document.createElement('script');
+            sc.src = 'http://typhoon.nmc.cn/weatherservice/typhoon/jsons/view_' + id + '?t=' + Date.now();
+            sc.onerror = function(){ resolve(null); };
+            document.head.appendChild(sc);
+            setTimeout(function(){ if (sc.parentNode) sc.parentNode.removeChild(sc); }, 8000);
+        });
+    }
+
+    // 绘制台风路径
+    window.drawTyphoonPath = function(id){
+        if (!window.map) return;
+        if (!_typhoonLayer) _typhoonLayer = L.layerGroup().addTo(window.map);
+        _typhoonLayer.clearLayers();
+
+        loadTyphoonDetail(id).then(function(data){
+            if (!data || !data.typhoon) return;
+            var ty = data.typhoon;
+            // ty 是数组: [id, enname, name, tcnum, ..., points]
+            var pts = (ty[8] || []);
+            var smap = {"TD":"热带低压","TS":"热带风暴","STS":"强热带风暴","TY":"台风","STY":"强台风","SuperTY":"超强台风"};
+            var realLL = [], realPts = [], allBounds = [];
+
+            for (var i=0;i<pts.length;i++){
+                var pt = pts[i];
+                if (!pt || pt.length < 6) continue;
+                var la = parseFloat(pt[5]), lo = parseFloat(pt[4]);
+                if (isNaN(la) || isNaN(lo)) continue;
+                realLL.push([la, lo]);
+                var st = smap[pt[3]] || pt[3] || '';
+                realPts.push({strong: st, time: pt[1]});
+                allBounds.push([la, lo]);
+            }
+
+            // 实况线（按强度着色）
+            for (var k=0;k<realLL.length-1;k++){
+                L.polyline([realLL[k], realLL[k+1]], {color: strengthColor(realPts[k].strong), weight: 4, opacity: 0.95}).addTo(_typhoonLayer);
+            }
+            // 实况点
+            for (var j=0;j<realLL.length;j++){
+                L.circleMarker(realLL[j], {radius: 4, color:'#fff', weight:2, fillColor: strengthColor(realPts[j].strong), fillOpacity:1}).addTo(_typhoonLayer);
+            }
+
+            // 预报路径（虚线，按强度着色）
+            var lastPoint = pts[pts.length - 1];
+            if (lastPoint && lastPoint.length > 10 && typeof lastPoint[10] === 'object'){
+                var fdict = lastPoint[10];
+                for (var org in fdict){
+                    var fcst = fdict[org];
+                    if (!Array.isArray(fcst)) continue;
+                    var fcLL = realLL.length ? [realLL[realLL.length-1]] : [];
+                    var fcPts = [];
+                    for (var m=0;m<fcst.length;m++){
+                        var f = fcst[m];
+                        if (!Array.isArray(f) || f.length < 4) continue;
+                        var qa = parseFloat(f[3]), qo = parseFloat(f[2]);
+                        if (isNaN(qa) || isNaN(qo)) continue;
+                        fcLL.push([qa, qo]);
+                        fcPts.push({strong: smap[f[7]] || f[7] || ''});
+                        allBounds.push([qa, qo]);
+                    }
+                    for (var n=0;n<fcLL.length-1;n++){
+                        L.polyline([fcLL[n], fcLL[n+1]], {color: strengthColor(fcPts[n] ? fcPts[n].strong : ''), weight: 3, opacity: 0.9, dashArray: '8, 6'}).addTo(_typhoonLayer);
+                    }
+                }
+            }
+
+            // 台风中心旋转图标
+            if (realLL.length > 0){
+                var c = realLL[realLL.length-1];
+                L.marker(c, {icon: L.divIcon({className:'', html:'<div class="typhoon-spin" style="font-size:28px;text-align:center;line-height:28px;text-shadow:0 0 4px #000;">🌀</div>', iconSize:[28,28], iconAnchor:[14,14]})}).addTo(_typhoonLayer);
+            }
+
+            // 飞到路径范围
+            if (allBounds.length > 1){
+                window.map.flyToBounds(L.latLngBounds(allBounds), {padding:[60,60], duration:1.5});
+            }
+            console.log('✅ 台风路径已绘制: ' + realLL.length + ' 个实况点');
+        });
+    };
+
+    // 渲染台风列表
+    function refreshTyphoonView(){
+        var side = document.getElementById('side');
+        if (!side) return;
+        var list = window._typhoonList || [];
+        if (!list.length){
+            side.innerHTML = '<div style="padding:20px;color:#888;text-align:center;">暂无台风数据<br><span style="font-size:12px;color:#666;">等待加载...</span></div>';
+            return;
+        }
+        var html = '<div style="padding:6px 12px;font-size:11px;color:#888;border-bottom:1px solid #333;">共 ' + list.length + ' 个台风</div>';
+        for (var i=0;i<list.length;i++){
+            var t = list[i];
+            var active = t.isactive === '1';
+            var tag = active ? '<span style="color:#00e676;font-weight:bold;flex-shrink:0;">● 活跃</span>' : '<span style="color:#888;flex-shrink:0;">○ 已停编</span>';
+            var num = t.tc_num ? '第' + (function(n){ n=String(n||''); var m=n.slice(-2); m=m.replace(/^0+/,''); return m||n; })(t.tc_num) + '号' : '';
+            html += '<div class="item" data-typhoon="' + t.id + '" style="cursor:pointer;white-space:nowrap;">' +
+                '<div style="display:flex;gap:6px;align-items:center;flex-wrap:nowrap;">' +
+                    '<span class="badge" style="background:' + (active?'#ff2d2d':'#666') + ';flex-shrink:0;white-space:nowrap;">🌀 台风</span>' +
+                    '<span style="font-weight:bold;color:#fff;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;min-width:0;">' + (t.name||'') + ' ' + (t.enname||'') + '</span>' +
+                    tag +
+                '</div>' +
+                '<div class="meta" style="margin-top:2px;">' + num + '</div>' +
+            '</div>';
+        }
+        side.innerHTML = html;
+
+        // 绑定点击
+        var items = side.querySelectorAll('.item[data-typhoon]');
+        for (var k=0;k<items.length;k++){
+            (function(el){
+                el.onclick = function(){
+                    var tid = el.getAttribute('data-typhoon');
+                    if (tid) window.drawTyphoonPath(tid);
+                };
+            })(items[k]);
+        }
+    }
+
+    // 挂钩标签切换
+    var _lastTab = null;
+    setInterval(function(){
+        if (window.tab === 3 && _lastTab !== 3){
+            _lastTab = 3;
+            refreshTyphoonView();
+        } else if (window.tab !== 3) {
+            _lastTab = null;
+        }
+    }, 500);
+
+    // 启动加载
+    setTimeout(loadTyphoonList, 1500);
+    setInterval(loadTyphoonList, 300000);
+
+    // 每 20 秒检查一次，如果当前在台风标签且列表为空，重新渲染
+    setInterval(function(){
+        if (window.tab !== 3) return;
+        var side = document.getElementById('side');
+        if (!side) return;
+        var hasItems = side.querySelector('.item[data-typhoon]');
+        if (!hasItems && (window._typhoonList || []).length > 0) {
+            refreshTyphoonView();
+        }
+    }, 20000);
+
+    // ===== 自动绘制所有活跃台风的路径 =====
+    function drawAllActive(){
+        if (!window.map) return;
+        var list = (window._typhoonList || []).filter(function(t){ return t.isactive === '1'; });
+        if (!list.length) return;
+        if (!_typhoonLayer) _typhoonLayer = L.layerGroup().addTo(window.map);
+        _typhoonLayer.clearLayers();
+
+        var allBounds = [];
+        var pending = list.length;
+
+        list.forEach(function(t){
+            loadTyphoonDetail(t.id).then(function(data){
+                try {
+                    if (!data || !data.typhoon) return;
+                    var ty = data.typhoon;
+                    var pts = (ty[8] || []);
+                    var smap = {"TD":"热带低压","TS":"热带风暴","STS":"强热带风暴","TY":"台风","STY":"强台风","SuperTY":"超强台风"};
+                    var realLL = [], realPts = [];
+                    for (var i=0;i<pts.length;i++){
+                        var pt = pts[i];
+                        if (!pt || pt.length < 6) continue;
+                        var la = parseFloat(pt[5]), lo = parseFloat(pt[4]);
+                        if (isNaN(la) || isNaN(lo)) continue;
+                        realLL.push([la, lo]);
+                        realPts.push({strong: smap[pt[3]] || pt[3] || ''});
+                        allBounds.push([la, lo]);
+                    }
+                    // 实况线
+                    for (var k=0;k<realLL.length-1;k++){
+                        L.polyline([realLL[k], realLL[k+1]], {color: strengthColor(realPts[k].strong), weight: 4, opacity: 0.95}).addTo(_typhoonLayer);
+                    }
+                    // 实况点
+                    for (var j=0;j<realLL.length;j++){
+                        L.circleMarker(realLL[j], {radius: 4, color:'#fff', weight:2, fillColor: strengthColor(realPts[j].strong), fillOpacity:1}).addTo(_typhoonLayer);
+                    }
+                    // 预报虚线
+                    var lastPoint = pts[pts.length - 1];
+                    if (lastPoint && lastPoint.length > 10 && typeof lastPoint[10] === 'object'){
+                        var fdict = lastPoint[10];
+                        for (var org in fdict){
+                            var fcst = fdict[org];
+                            if (!Array.isArray(fcst)) continue;
+                            var fcLL = realLL.length ? [realLL[realLL.length-1]] : [];
+                            var fcPts = [];
+                            for (var m=0;m<fcst.length;m++){
+                                var f = fcst[m];
+                                if (!Array.isArray(f) || f.length < 4) continue;
+                                var qa = parseFloat(f[3]), qo = parseFloat(f[2]);
+                                if (isNaN(qa) || isNaN(qo)) continue;
+                                fcLL.push([qa, qo]);
+                                fcPts.push({strong: smap[f[7]] || f[7] || ''});
+                                allBounds.push([qa, qo]);
+                            }
+                            for (var n=0;n<fcLL.length-1;n++){
+                                L.polyline([fcLL[n], fcLL[n+1]], {color: strengthColor(fcPts[n] ? fcPts[n].strong : ''), weight: 3, opacity: 0.9, dashArray: '8, 6'}).addTo(_typhoonLayer);
+                            }
+                        }
+                    }
+                    // 中心旋转图标
+                    if (realLL.length > 0){
+                        var c = realLL[realLL.length-1];
+                        L.marker(c, {icon: L.divIcon({className:'', html:'<div class="typhoon-spin" style="font-size:28px;text-align:center;line-height:28px;text-shadow:0 0 4px #000;">🌀</div>', iconSize:[28,28], iconAnchor:[14,14]})}).addTo(_typhoonLayer);
+                        L.marker(c, {icon: L.divIcon({className:'', html:'<div style="color:#ff2d2d;font-size:12px;font-weight:bold;text-shadow:0 0 3px #000;">'+(t.name||'')+'</div>', iconSize:[80,14], iconAnchor:[-14,8]})}).addTo(_typhoonLayer);
+                    }
+                } catch(e){}
+                pending--;
+                if (pending === 0 && allBounds.length > 1){
+                    window.map.flyToBounds(L.latLngBounds(allBounds), {padding:[60,60], duration:1.5});
+                }
+            });
+        });
+        console.log('🚀 自动绘制 ' + list.length + ' 个活跃台风路径');
+    }
+
+    // 列表加载完后自动绘制活跃路径
+    var _origLoad = loadTyphoonList;
+    // 在列表加载成功后延迟调用
+    setTimeout(function(){
+        // 等列表加载
+        var tryDraw = function(){
+            if ((window._typhoonList || []).length > 0) {
+                drawAllActive();
+            } else {
+                setTimeout(tryDraw, 2000);
+            }
+        };
+        setTimeout(tryDraw, 3000);
+    }, 2000);
+    // 每 10 分钟重绘一次
+    setInterval(drawAllActive, 600000);
+
+    console.log('OK 台风模块已就绪');
+})();
+</script>
+
+
+<script>
+// ===== 底部标签统一切换 =====
+(function(){
+    function parseT(x){
+        if (!x) return 0;
+        var t = new Date(String(x).replace(/-/g,'/').replace('T',' ')).getTime();
+        return isNaN(t) ? 0 : t;
+    }
+    function pickLoc(e){
+        var c = [e.HypoCenter, e.Hypocenter, e.LOCATION_C, e.placeName, e.place];
+        for (var i=0;i<c.length;i++){ if(c[i] && String(c[i]).trim()!=="") return String(c[i]); }
+        return '未知';
+    }
+
+    // 每种标签的配置
+    var CONF = {
+        0: {icon:'⚠️', name:'预警', color:'#e63946'},
+        1: {icon:'📜', name:'历史', color:'#457b9d'},
+        2: {icon:'',   name:'',    color:''},
+        4: {icon:'🌋', name:'火山', color:'#ff6b00'},
+        5: {icon:'☁️', name:'气象', color:'#ffcc00'},
+        6: {icon:'⚠️', name:'灾害', color:'#8b00ff'},
+        7: {icon:'☄️', name:'小行星', color:'#3333cc'},
+        8: {icon:'🌊', name:'海啸', color:'#1e6fd9'},
+        9: {icon:'📡', name:'测站', color:'#00e676'}
+    };
+
+    function getList(t){
+        if (t === 0) return (window.allEew || []).filter(function(e){ return e._kind === 'eew'; });
+        if (t === 1) return window.allHist || [];
+        if (t === 4) return window._volcanoList || [];
+        if (t === 5) return window._weatherList || [];
+        if (t === 6) return window._chejiList || [];
+        if (t === 7) return window._neaList || [];
+        if (t === 8) return window._tsunamiList || [];
+        if (t === 9) return window._stationList || [];
+        return (window.allEew || []).concat(window.allHist || []);
+    }
+
+    function makeHtml(e, idx, tab){
+        var la = parseFloat(e.latitude || e.lat || e.Latitude || e.EPI_LAT);
+        var lo = parseFloat(e.longitude || e.lng || e.lon || e.Longitude || e.EPI_LON);
+        var id = String(e.id || e.EventID || ('x_'+tab+'_'+idx));
+        var c = CONF[tab] || {icon:'•',name:'数据',color:'#666'};
+
+        var effTab = tab;
+        if (tab === 2) effTab = (e._kind === 'eew' || String(e.type||'').toUpperCase().indexOf('EEW') >= 0) ? 0 : 1;
+
+        var title = pickLoc(e);
+        var subs = [];
+
+        if (tab === 9) {
+            title = e.name || id;
+            var inten = parseFloat(e.intensity);
+            subs = [e.source||'', '震度 '+(isNaN(inten)?'--':inten), '位置 '+(isNaN(la)?'?':la.toFixed(2))+', '+(isNaN(lo)?'?':lo.toFixed(2))];
+        } else if (effTab === 0 || effTab === 1) {
+            var mag = parseFloat(e.Magnitude || e.M || 0);
+            var rn = e.ReportNum || e.updates || 1;
+            var isFinal = e.isFinal || e.final || false;
+            var rawTime = e.OriginTime || e.O_TIME || e.shockTime || e.time || '';
+            var timeStr = rawTime ? String(rawTime).slice(0, 19).replace('T', ' ') : '--';
+            var depVal = (e.Depth !== undefined && e.Depth !== null && e.Depth !== '') ? e.Depth : ((e.EPI_DEPTH !== undefined && e.EPI_DEPTH !== null) ? e.EPI_DEPTH : '?');
+            if (effTab === 0) {
+                var isJMA = String(e.type||'').toUpperCase().indexOf('JMA')>=0 || String(e.HypoCenter||'').toUpperCase().indexOf('JMA')>=0;
+                var tag = isFinal ? (isJMA?'最终第'+rn+'报':'最终报') : ('第'+rn+'报');
+                subs = ['M'+mag.toFixed(1), '深'+depVal+'km', tag, timeStr];
+            } else {
+                subs = ['M'+mag.toFixed(1), '深'+depVal+'km', timeStr];
+            }
+        } else if (tab === 8) {
+            if (e.warningInfo) {
+                title = (e.warningInfo.level?'['+e.warningInfo.level+']':'') + (e.warningInfo.title||'海啸');
+                var si = e.shockInfo || {};
+                subs = [si.placeName||'', (si.magnitude?'M'+si.magnitude:''), (si.shockTime||'')];
+            } else {
+                subs = [e.subtitle||'', e.shockTime||''];
+            }
+        } else if (tab === 4) {
+            title = e.volcanoName || e.name || '火山';
+            subs = [e.activity||'', e.infoTypeName||'', e.reportTime||''];
+        } else if (tab === 5) {
+            title = e.title || e.name || '气象';
+            subs = [e.headline||'', e.effective||''];
+        } else if (tab === 6) {
+            title = e.placeName || e.name || '灾害';
+            subs = [e.eventTypeName||'', e.location||'', e.latestReportLevel||''];
+        } else if (tab === 7) {
+            title = e.name || '小行星';
+            subs = [e.flybyTime||'', e.missDistanceKm ? e.missDistanceKm+'km' : '', e.pha ? 'PHA' : ''];
+        }
+
+        subs = subs.filter(function(x){ return x; });
+
+        return '<div class="item" data-id="'+id+'" data-la="'+(isNaN(la)?'':la)+'" data-lo="'+(isNaN(lo)?'':lo)+'" style="white-space:nowrap;cursor:pointer;">' +
+            '<div style="display:flex;gap:5px;align-items:center;flex-wrap:nowrap;">' +
+                (c.icon ? '<span class="badge" style="background:'+c.color+';flex-shrink:0;white-space:nowrap;">'+c.icon+' '+c.name+'</span>' : '') +
+                '<span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;min-width:0;color:#fff;">'+title+'</span>' +
+            '</div>' +
+            (subs.length ? '<div class="meta" style="margin-top:2px;">'+subs.join(' · ')+'</div>' : '') +
+        '</div>';
+    }
+
+    function renderTab(t){
+        var side = document.getElementById('side');
+        if (!side) return;
+
+        // 台风标签交给台风模块自己渲染
+        if (t === 3) {
+            if (window.refreshTyphoonView) { window.refreshTyphoonView(); return; }
+            var tl = window._typhoonList || [];
+            if (!tl.length) {
+                side.innerHTML = '<div style="padding:20px;color:#888;text-align:center;">暂无台风数据</div>';
+                return;
+            }
+            var h = '<div style="padding:6px 12px;font-size:11px;color:#888;border-bottom:1px solid #333;">共 '+tl.length+' 个台风</div>';
+            for (var ti=0; ti<tl.length; ti++){
+                var tt = tl[ti];
+                var active = tt.isactive === '1';
+                var num = tt.tc_num ? '第' + (function(n){ n=String(n); var m=n.slice(-2).replace(/^0+/,''); return m||n; })(tt.tc_num) + '号' : '';
+                h += '<div class="item" data-typhoon="'+tt.id+'" style="cursor:pointer;white-space:nowrap;">' +
+                    '<div style="display:flex;gap:6px;align-items:center;flex-wrap:nowrap;">' +
+                        '<span class="badge" style="background:'+(active?'#ff2d2d':'#666')+';flex-shrink:0;white-space:nowrap;">🌀 台风</span>' +
+                        '<span style="font-weight:bold;color:#fff;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;min-width:0;">'+(tt.name||'')+' '+(tt.enname||'')+'</span>' +
+                        (active?'<span style="color:#00e676;font-weight:bold;flex-shrink:0;">● 活跃</span>':'<span style="color:#888;flex-shrink:0;">○ 已停编</span>') +
+                    '</div>' +
+                    '<div class="meta" style="margin-top:2px;">'+num+'</div>' +
+                '</div>';
+            }
+            side.innerHTML = h;
+            var its = side.querySelectorAll('.item[data-typhoon]');
+            for (var k=0;k<its.length;k++){
+                (function(el){
+                    el.onclick = function(){
+                        var tid = el.getAttribute('data-typhoon');
+                        if (tid && window.drawTyphoonPath) window.drawTyphoonPath(tid);
+                    };
+                })(its[k]);
+            }
+            return;
+        }
+
+        var list = getList(t);
+        list.sort(function(a,b){ return parseT(b.OriginTime||b.O_TIME||b.shockTime) - parseT(a.OriginTime||a.O_TIME||a.shockTime); });
+        if (!list.length){
+            side.innerHTML = '<div style="padding:20px;color:#888;text-align:center;">暂无数据</div>';
+            return;
+        }
+        var _maxN = 100;
+        try { var _v = parseInt(localStorage.getItem('list_limit')); if (_v > 0) _maxN = _v; } catch(e){}
+        var html = '<div style="padding:6px 12px;font-size:11px;color:#888;border-bottom:1px solid #333;">共 '+list.length+' 条，显示前 '+_maxN+' 条</div>';
+        for (var i = 0; i < list.length && i < _maxN; i++){
+            html += makeHtml(list[i], i, t);
+        }
+        side.innerHTML = html;
+    }
+
+    // 强制绑定底部按钮
+    function bindTabs(){
+        var ids = ['tabAll','tabEew','tabHist','tabTyphoon','tabVolcano','tabWeather','tabCheji','tabNea','tabTsunami2','tabStation'];
+        var map2 = {'tabAll':2,'tabEew':0,'tabHist':1,'tabTyphoon':3,'tabVolcano':4,'tabWeather':5,'tabCheji':6,'tabNea':7,'tabTsunami2':8,'tabStation':9};
+        ids.forEach(function(id){
+            var b = document.getElementById(id);
+            if (!b || b._tabBound) return;
+            b._tabBound = true;
+            b.onclick = function(e){
+                if (e && e.preventDefault) e.preventDefault();
+                var t = map2[id];
+                window.tab = t;
+                // 高亮
+                ids.forEach(function(x){ var el = document.getElementById(x); if (el) el.className = ''; });
+                b.className = 'on';
+                renderTab(t);
+            };
+        });
+    }
+
+    // 全局点击委托（列表项跳转）
+    document.addEventListener('click', function(ev){
+        var el = ev.target;
+        while (el && el !== document) {
+            if (el.classList && el.classList.contains('item')) {
+                if (el.getAttribute('data-typhoon')) return; // 台风单独处理
+                var la = parseFloat(el.getAttribute('data-la'));
+                var lo = parseFloat(el.getAttribute('data-lo'));
+                if (!isNaN(la) && !isNaN(lo) && (la!==0||lo!==0) && window.map) {
+                    window.map.flyTo([la, lo], 8, {duration: 0.8});
+                }
+                return;
+            }
+            el = el.parentNode;
+        }
+    }, true);
+
+    // 初始化
+    bindTabs();
+    var n = 0;
+    var t = setInterval(function(){ bindTabs(); if (++n > 100) clearInterval(t); }, 500);
+
+    // 首次渲染
+    setTimeout(function(){ renderTab(window.tab === undefined ? 2 : window.tab); }, 800);
+
+    console.log('OK 底部标签统一切换已就绪');
+})();
+</script>
+
+
+
+
+
+
+
+
+<script>
+// ===== 摇晃区域（所有活跃地震，带呼吸动画） =====
+(function(){
+    var _layer = null;
+    var _circles = [];   // 存所有圆圈
+    var _drawnIds = {};  // 已绘制的 id 集合，避免重复
+
+    function calcRadii(mag, depth){
+        depth = Math.max(depth, 1);
+        var R = {};
+        function radius(level){
+            var base = Math.pow(10, 0.5 * mag - 0.5 * Math.log10(depth) + 0.6);
+            var factor = Math.pow(1.5, 6 - level);
+            return Math.max(5, Math.min(base * factor, 800));
+        }
+        R[3] = radius(3);
+        R[4] = radius(4);
+        R[5] = radius(5);
+        return R;
+    }
+
+    function draw(){
+        if (!window.map) return;
+        if (!_layer) _layer = L.layerGroup().addTo(window.map);
+        if (!window.map.hasLayer(_layer)) _layer.addTo(window.map);
+
+        // 收集当前活跃地震（10分钟内）
+        var now = Date.now();
+        var src = (window.allEew || []).concat(window.allHist || []);
+        var active = [];
+        var seen = {};
+        for (var i = 0; i < src.length; i++){
+            var e = src[i];
+            var t = new Date(String(e.OriginTime || e.O_TIME || e.shockTime || '').replace(/-/g,'/').replace('T',' ')).getTime();
+            if (isNaN(t)) continue;
+            var el = (now - t) / 1000;
+            if (el < 0 || el > 600) continue;
+
+            var la = parseFloat(e.Latitude || e.EPI_LAT);
+            var lo = parseFloat(e.Longitude || e.EPI_LON);
+            var mag = parseFloat(e.Magnitude || e.M || 0);
+            if (isNaN(la) || isNaN(lo) || mag <= 0) continue;
+
+            // 去重：经纬度 1 位小数 + 分钟
+            var key = la.toFixed(1) + '_' + lo.toFixed(1) + '_' + String(t).slice(0, -5);
+            if (seen[key]) continue;
+            seen[key] = 1;
+
+            var id = key;
+            active.push({id: id, la: la, lo: lo, mag: mag, dep: parseFloat(e.Depth !== undefined ? e.Depth : (e.EPI_DEPTH || 10))});
+        }
+
+        // 已存在的不重画
+        var needRedraw = false;
+        for (var j = 0; j < active.length; j++){
+            if (!_drawnIds[active[j].id]) { needRedraw = true; break; }
+        }
+        // 也要检查是否有已消失的（数量对不上）
+        if (Object.keys(_drawnIds).length !== active.length) needRedraw = true;
+
+        if (!needRedraw) return;
+
+        // 重画全部
+        _layer.clearLayers();
+        _circles = [];
+        _drawnIds = {};
+
+        for (var k = 0; k < active.length; k++){
+            var a = active[k];
+            _drawnIds[a.id] = 1;
+            var R = calcRadii(a.mag, a.dep);
+
+            // 三个同心圆
+            var levels = [
+                {r: R[5], weight: 3, dash: null},
+                {r: R[4], weight: 2, dash: '10, 6'},
+                {r: R[3], weight: 1.5, dash: '6, 6'}
+            ];
+            for (var m = 0; m < levels.length; m++){
+                var lv = levels[m];
+                var c = L.circle([a.la, a.lo], {
+                    radius: lv.r * 1000,
+                    color: '#ffcc00',
+                    weight: lv.weight,
+                    opacity: 0.85,
+                    fill: true,
+                    fillColor: '#ffcc00',
+                    fillOpacity: 0.10,
+                    dashArray: lv.dash,
+                    interactive: false
+                }).addTo(_layer);
+                _circles.push(c);
+            }
+
+            // 长周期矩形
+            var boxR = R[4] * 1.4;
+            L.rectangle([
+                [a.la - boxR / 111, a.lo - boxR / (111 * Math.cos(a.la * Math.PI / 180))],
+                [a.la + boxR / 111, a.lo + boxR / (111 * Math.cos(a.la * Math.PI / 180))]
+            ], {
+                color: '#ffcc00', weight: 2, opacity: 0.85, fill: false,
+                dashArray: '12, 4', interactive: false
+            }).addTo(_layer);
+        }
+    }
+
+    // 呼吸动画
+    setInterval(function(){
+        if (!_circles.length) return;
+        var t = Date.now() % 2000 / 2000;
+        var s = (1 - Math.cos(t * 2 * Math.PI)) / 2;
+        var op = 0.4 + s * 0.6;
+        var fill = 0.04 + s * 0.12;
+        for (var i = 0; i < _circles.length; i++){
+            try { _circles[i].setStyle({opacity: op, fillOpacity: fill}); } catch(e){}
+        }
+    }, 100);
+
+    setInterval(draw, 1000);
+    setTimeout(draw, 800);
+
+    console.log('OK 摇晃区域（所有活跃地震）已启动');
+})();
+</script>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<!-- JMA_COLOR_LABEL -->
+<script>
+(function(){
+  var ARR = ["0","1","2","3","4","5弱","5強","6弱","6強","7"];
+  var COLOR = {
+    "0":"#FFFFFF","1":"#00AAFF","2":"#0041FF","3":"#FAE696",
+    "4":"#FFE600","5弱":"#FF9900","5強":"#FF2800",
+    "6弱":"#A50021","6強":"#B40068","7":"#8B0000"
+  };
+  var RANK = {"0":0,"1":1,"2":2,"3":3,"4":4,"5弱":5,"5強":6,
+              "6弱":7,"6強":8,"7":9};
+
+  function jmaLabel(n){
+    if (isNaN(n)) return null;
+    if (n <= 0) return "0";
+    var i = Math.round(n);
+    if (i < 1) i = 1;
+    if (i > 10) i = 10;
+    return ARR[i-1];
+  }
+  function inTopLeft(el){
+    if (!el || !el.getBoundingClientRect) return false;
+    var r = el.getBoundingClientRect();
+    return r.left < 420 && r.top < 460 && r.width > 0 && r.height > 0;
+  }
+
+  function convert(){
+    var all = document.querySelectorAll("*");
+    for (var i=0;i<all.length;i++){
+      var el = all[i];
+      if (el.children.length) continue;
+      if (el.getAttribute && el.getAttribute("data-jma")) continue;
+      var v = el.textContent;
+      if (!/^\s*\d+(\.\d+)?\s*$/.test(v)) continue;
+      if (!inTopLeft(el)) continue;
+      var lb = jmaLabel(parseFloat(v));
+      if (lb === null) continue;
+      el.setAttribute("data-jma", lb);
+      el.textContent = lb;
+      el.style.color = COLOR[lb] || "#fff";
+      el.style.fontWeight = "bold";
+      el.style.textShadow = "0 0 4px rgba(0,0,0,.9)";
+    }
+  }
+
+  function rankOf(txt){
+    var m = (txt||"").match(/(7|6強|6弱|5強|5弱|\d+(\.\d+)?)/);
+    if (!m) return -1;
+    var k = m[1];
+    if (RANK[k] !== undefined) return RANK[k];
+    return RANK[jmaLabel(parseFloat(k))] !== undefined ? RANK[jmaLabel(parseFloat(k))] : -1;
+  }
+
+  function sortRows(){
+    var all = document.querySelectorAll("*");
+    var rows = [];
+    for (var i=0;i<all.length;i++){
+      var el = all[i];
+      if (el.children.length) continue;
+      if (!/测站/.test(el.textContent||"")) continue;
+      var row = el.parentNode;
+      for (var k=0;k<5 && row;k++){
+        var r = row.getBoundingClientRect ? row.getBoundingClientRect() : null;
+        if (r && r.width > 160 && r.height < 70) break;
+        row = row.parentNode;
+      }
+      if (row && rows.indexOf(row) < 0) rows.push(row);
+    }
+    if (rows.length < 2) return;
+    var par = rows[0].parentNode;
+    for (var i=1;i<rows.length;i++) if (rows[i].parentNode !== par) return;
+    var arr = rows.map(function(r){ return {r:r, v:rankOf(r.textContent)}; });
+    var cur = arr.map(function(o){return o.v;}).join(",");
+    arr.sort(function(a,b){ return b.v - a.v; });
+    var nxt = arr.map(function(o){return o.v;}).join(",");
+    if (cur === nxt) return;
+    arr.forEach(function(o){ par.appendChild(o.r); });
+  }
+
+  function run(){ try{ convert(); sortRows(); }catch(e){} }
+
+  var obs = new MutationObserver(function(){
+    obs.disconnect();
+    run();
+    obs.observe(document.body, {childList:true, subtree:true, characterData:true});
+  });
+  obs.observe(document.body, {childList:true, subtree:true, characterData:true});
+  setInterval(function(){
+    obs.disconnect(); run();
+    obs.observe(document.body, {childList:true, subtree:true, characterData:true});
+  }, 1000);
+  run();
+})();
+</script>
+
+
+
+<!-- PS_COUNTDOWN -->
+<script>
+(function(){
+  var VP = 7.0, VS = 4.0;
+  var DEFAULT = {lat:35.68, lon:139.76};
+  var myPos = null;
+  if (navigator.geolocation){
+    navigator.geolocation.getCurrentPosition(
+      function(p){ myPos={lat:p.coords.latitude, lon:p.coords.longitude}; },
+      function(){ myPos = DEFAULT; });
+  }
+
+  var el = document.createElement('div');
+  el.id = '__ps_panel';
+  el.style.cssText = "position:fixed;left:12px;z-index:99990;" +
+    "background:rgba(0,0,0,.78);color:#fff;padding:8px 12px;border-radius:8px;" +
+    "font:12px/1.6 monospace;min-width:150px;border:1px solid #2a4a6a";
+  el.innerHTML = '<div style="color:#9fe6ff;font-weight:bold">P/S 波倒计时</div>' +
+    '<div>P波 <span id="__p_t" style="color:#4fc3f7">--</span></div>' +
+    '<div>S波 <span id="__s_t" style="color:#ffb703">--</span></div>';
+  document.body.appendChild(el);
+
+  // 动态定位：贴在左下角图例正上方
+  function place(){
+    var all = document.querySelectorAll('*');
+    var legend = null;
+    for (var i=0;i<all.length;i++){
+      var x = all[i];
+      if (x.children.length > 8) continue;
+      var r = x.getBoundingClientRect();
+      if (r.width < 120 || r.height < 80) continue;
+      if (r.left > innerWidth*0.4) continue;
+      if (r.bottom < innerHeight*0.5) continue;
+      if (/测站震度|XI|XII/.test(x.textContent||'')) legend = r;
+    }
+    if (legend){
+      el.style.bottom = (innerHeight - legend.top + 8) + 'px';
+    } else {
+      el.style.bottom = '270px';
+    }
+  }
+  setInterval(place, 1200);
+
+  function dist(a,b){
+    var R=6371,d2r=Math.PI/180;
+    var dlat=(b.lat-a.lat)*d2r, dlon=(b.lon-a.lon)*d2r;
+    var x=Math.sin(dlat/2)*Math.sin(dlat/2)+
+          Math.cos(a.lat*d2r)*Math.cos(b.lat*d2r)*Math.sin(dlon/2)*Math.sin(dlon/2);
+    return 2*R*Math.asin(Math.sqrt(x));
+  }
+  function parseTime(str,tz){
+    if(!str) return 0;
+    var m=str.match(/(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2}):(\d{2})/);
+    if(!m) return 0;
+    var off=0;
+    if(tz){ var sg=tz[0]==='-'?-1:1; off=sg*parseInt(tz.slice(1,3),10); }
+    return Date.UTC(+m[1],+m[2]-1,+m[3],+m[4],+m[5],+m[6]) - off*3600000;
+  }
+  var cur=null;
+  function fetchEv(){
+    fetch("http://127.0.0.1:18080/all_eew").then(function(r){return r.json();})
+      .then(function(list){
+        if(!list||!list.length){ cur=null; return; }
+        var best=null;
+        for(var i=0;i<list.length;i++){
+          var it=list[i];
+          if(it.isCancel) continue;
+          if(it.Latitude===undefined||it.Longitude===undefined) continue;
+          if(!best||(it.OriginTime||"")>(best.OriginTime||"")) best=it;
+        }
+        cur=best;
+      }).catch(function(){});
+  }
+  function tick(){
+    var p=document.getElementById("__p_t"), s2=document.getElementById("__s_t");
+    if(!p||!s2) return;
+    if(!cur||!myPos){ p.textContent="--"; s2.textContent="--"; return; }
+    var epi={lat:parseFloat(cur.Latitude), lon:parseFloat(cur.Longitude)};
+    var d=dist(myPos,epi);
+    var t0=parseTime(cur.OriginTime, cur._tz);
+    var t=(Date.now()-t0)/1000;
+    var tp=d/VP-t, ts=d/VS-t;
+    p.textContent = tp>0 ? tp.toFixed(1)+" 秒" : "已到达";
+    s2.textContent = ts>0 ? ts.toFixed(1)+" 秒" : "已到达";
+  }
+  setInterval(fetchEv,1000);
+  setInterval(tick,200);
+  fetchEv(); tick(); place();
+})();
+</script>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<!-- QUAKE_UISCALE -->
+<script>
+(function(){
+  var KEY='quake_ui_zoom';
+  var z = 1.6;
+  try{ var v=localStorage.getItem(KEY); if(v!==null) z=parseFloat(v)||1.6; }catch(e){}
+
+  function apply(){ document.documentElement.style.zoom = z; }
+  apply();
+
+  var row = document.createElement('div');
+  row.id = '__uiscale_row';
+  row.style.cssText = 'margin:4px 0 12px;font-size:13px';
+  row.innerHTML =
+    '<div style="margin-bottom:4px;color:#9fe6ff">界面缩放 <span id="__zv"></span></div>' +
+    '<input type="range" id="__zr" min="8" max="30" step="1" style="width:100%">';
+
+  function bind(){
+    var r = document.getElementById('__zr');
+    var lbl = document.getElementById('__zv');
+    if (!r || !lbl) return;
+    r.value = Math.round(z*10);
+    lbl.textContent = z.toFixed(1) + 'x';
+    r.oninput = function(){
+      z = parseInt(r.value,10)/10;
+      lbl.textContent = z.toFixed(1) + 'x';
+      try{ localStorage.setItem(KEY, String(z)); }catch(e){}
+      apply();
+    };
+  }
+
+  function findPanel(){
+    var all = document.querySelectorAll('div,section');
+    var best=null, area=Infinity;
+    for (var i=0;i<all.length;i++){
+      var el=all[i];
+      if (el.children.length > 60) continue;
+      var r = el.getBoundingClientRect();
+      if (r.width < 180 || r.height < 100) continue;
+      if (r.width > innerWidth*0.98 || r.height > innerHeight*0.98) continue;
+      var t = el.textContent || '';
+      if (!/Token|token|申请|数据源/.test(t)) continue;
+      var a = r.width*r.height;
+      if (a < area){ area=a; best=el; }
+    }
+    return best;
+  }
+
+  function inject(){
+    if (document.getElementById('__uiscale_row')){
+      bind();
+      return true;
+    }
+    var p = findPanel();
+    if (!p) return false;
+    p.insertBefore(row, p.firstChild);
+    bind();
+    return true;
+  }
+
+  setInterval(inject, 700);
+  inject();
+})();
+</script>
+</body>
+</html>
