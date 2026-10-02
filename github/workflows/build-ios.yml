@@ -1,0 +1,127 @@
+name: Build iOS
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 准备 iOS 工程
+        run: |
+          mkdir -p ios/Quake
+          cp Quake/quake.html ios/Quake/
+          [ -f Quake/quake.png ] && cp Quake/quake.png ios/Quake/
+          for d in geo static tile_cache; do [ -d "Quake/$d" ] && cp -r "Quake/$d" ios/Quake/; done
+
+          cat > ios/Quake/AppDelegate.swift << 'EOF'
+          import UIKit
+          @main
+          class AppDelegate: UIResponder, UIApplicationDelegate {
+              var window: UIWindow?
+              func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?) -> Bool {
+                  window = UIWindow(frame: UIScreen.main.bounds)
+                  window?.rootViewController = WebViewController()
+                  window?.makeKeyAndVisible()
+                  return true
+              }
+          }
+          EOF
+
+          cat > ios/Quake/WebViewController.swift << 'EOF'
+          import UIKit
+          import WebKit
+          class WebViewController: UIViewController {
+              var webView: WKWebView!
+              override func loadView() {
+                  let config = WKWebViewConfiguration()
+                  config.allowsInlineMediaPlayback = true
+                  config.preferences.setValue(true, forKey: "allowFileAccessFromFileURLs")
+                  webView = WKWebView(frame: .zero, configuration: config)
+                  view = webView
+              }
+              override func viewDidLoad() {
+                  super.viewDidLoad()
+                  if let url = Bundle.main.url(forResource: "quake", withExtension: "html") {
+                      webView.loadFileURL(url, allowingReadAccessTo: url.deletingLastPathComponent())
+                  }
+              }
+          }
+          EOF
+
+          cat > ios/project.yml << 'EOF'
+          name: Quake
+          options:
+            bundleIdPrefix: com.tiny
+            deploymentTarget:
+              iOS: "13.0"
+          targets:
+            Quake:
+              type: application
+              platform: iOS
+              sources: [Quake]
+              info:
+                path: Info.plist
+                properties:
+                  CFBundleDisplayName: Quake
+                  UILaunchScreen: {}
+                  NSAppTransportSecurity:
+                    NSAllowsArbitraryLoads: true
+              settings:
+                base:
+                  PRODUCT_BUNDLE_IDENTIFIER: com.tiny.quake
+                  CODE_SIGNING_ALLOWED: NO
+                  CODE_SIGNING_REQUIRED: NO
+          EOF
+
+          cat > ios/Info.plist << 'EOF'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>CFBundleDisplayName</key>
+            <string>Quake</string>
+            <key>CFBundleIdentifier</key>
+            <string>com.tiny.quake</string>
+            <key>CFBundleName</key>
+            <string>Quake</string>
+            <key>UILaunchScreen</key>
+            <dict/>
+          </dict>
+          </plist>
+          EOF
+
+      - name: 安装 xcodegen
+        run: brew install xcodegen
+
+      - name: 生成工程
+        working-directory: ios
+        run: xcodegen generate
+
+      - name: 编译
+        working-directory: ios
+        run: |
+          xcodebuild -project Quake.xcodeproj \
+            -scheme Quake \
+            -sdk iphoneos \
+            -configuration Release \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            build
+
+      - name: 打包 IPA
+        working-directory: ios
+        run: |
+          mkdir -p Payload
+          cp -r build/Build/Products/Release-iphoneos/Quake.app Payload/
+          zip -r Quake-unsigned.ipa Payload
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Quake-iOS-unsigned
+          path: ios/Quake-unsigned.ipa
