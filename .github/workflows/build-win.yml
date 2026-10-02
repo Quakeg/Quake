@@ -1,3 +1,4 @@
+
 name: Build Windows
 
 on:
@@ -34,8 +35,7 @@ jobs:
             "build": {
               "appId": "com.tiny.quake",
               "productName": "Quake",
-              "win": { "target": "portable" },
-              "portable": { "artifactName": "Quake-Windows-3.3.2.exe" },
+              "win": { "target": "zip" },
               "files": ["main.js", "index.html", "quake.png", "geo/**", "static/**", "tile_cache/**"]
             },
             "devDependencies": {
@@ -64,12 +64,12 @@ jobs:
         shell: bash
         run: npm install
 
-      - name: 打包 exe
+      - name: 打包
         working-directory: winapp
         shell: bash
-        run: npx electron-builder --win portable --publish never
+        run: npx electron-builder --win zip --publish never
 
       - uses: actions/upload-artifact@v4
         with:
           name: Quake-Windows
-          path: winapp/dist/*.exe
+          path: winapp/dist/*.zip
